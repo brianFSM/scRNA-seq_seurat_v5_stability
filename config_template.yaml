@@ -1,12 +1,17 @@
 project:
   analyst-name: Your Name
   project-name: 'Test'
-  project-decription: "ToDo"
+  project-description: "ToDo"
   organism: mouse
   run_cell_cycle: 'TRUE'
-  samples: -"Sample1" -"Sample2" -"Sample3" -"Sample4"
+  # Samples are now a proper YAML sequence. Dashes/quotes are no longer needed;
+  # names with spaces or dashes are handled correctly.
+  samples:
+    - Sample1
+    - Sample2
+    - Sample3
+    - Sample4
 data:
-  import-h5: no
   parent_directory_path: path/to/CellRanger
   rds-file-path: path/to/results
 analysis:
@@ -17,6 +22,7 @@ analysis:
     part1_report_tables_filename: part1_tables_for_report.RData
     part1_suffix: ''
     generate_metrics_tables: 'TRUE'
+    run_SoupX: 'FALSE'
     ggplot_dir: ggplot
   part2:
     mito_ceiling: 5
@@ -25,13 +31,23 @@ analysis:
     feature_count_floor: 300
     feature_count_ceiling: 6000
     rbc_ceiling: 100
-    ribo_floor: 5
+    # ribo_floor filters out cells BELOW this percent ribosomal content.
+    # This is non-standard and can remove legitimate low-ribo cell types, so it
+    # defaults to 0 (off). Raise it only if you have a specific reason to.
+    ribo_floor: 0
+    # Clustering resolution sweep. Silhouette maximization tends to favor coarse
+    # (fewer, larger) clusters, so a broad, standard Louvain range is used by
+    # default. Narrow or shift this to match expected biological granularity.
+    cluster_res_min: 0.1
+    cluster_res_max: 1.0
+    cluster_res_step: 0.1
     part2_rds_open_filename: _0_raw_seurat_object.RDS
     merged_seurat_obj_file: _2_seurat5_obj_merged.RDS
     integrated_seurat_obj_file: _3_seurat5_obj_integrated.RDS
     clustered_seurat_obj_file: _4_seurat5_obj_clustered.RDS
     part2_report_tables_filename: part2_tables_for_report.RData
     marker_gene_dir: marker_genes
+    run_doubletFinder: 'FALSE'
     part2_suffix: ''
     clustering_resolution: None
     num_clusters: 0
