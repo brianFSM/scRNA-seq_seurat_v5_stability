@@ -1,177 +1,185 @@
 # functions_for_report.R
 
-# Setup some directories in this scope so that things are saved properly
-
-# .report_cfg <- new.env(parent = emptyenv())
-# 
-# # called once from the Rmd to set paths
-# set_report_paths <- function(base.path = NULL,
-#                              ggplot.dir   = NULL,
-#                              dataset.path  = NULL,
-#                              out.dir   = NULL) {
-#   if (!is.null(base.path)) .report_cfg$base.path <- base.path
-#   if (!is.null(ggplot.dir))   .report_cfg$ggplot.dir   <- ggplot.dir
-#   if (!is.null(dataset.path))  .report_cfg$dataset.path  <- dataset.path
-#   if (!is.null(out.dir))   .report_cfg$out.dir   <- out.dir
-# }
-# 
-# # helper if you want it
-# get_report_cfg <- function() .report_cfg
-
 
 # Helper function that formats filenames. Allows for adding
-# suffix to config for alternate versions of analysis (e.g. 
+# suffix to config for alternate versions of analysis (e.g.
 # different clustering resolutions, filters, etc)
-suffix_path <- function(base_dir, filename, suffix = "") { 
-	# cfg <- get_report_cfg() 
-	# base_dir <- cfg$base.dir
+suffix_path <- function(base_dir, filename, suffix = "") {
 
-	root <- tools::file_path_sans_ext(filename) 
-	ext  <- tools::file_ext(filename) 
-	fn   <- if (nzchar(suffix)) paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "") else filename 
+	root <- tools::file_path_sans_ext(filename)
+	ext  <- tools::file_ext(filename)
+	fn   <- if (nzchar(suffix)) paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "") else filename
 	file.path(base_dir, fn)
 }
 
-# Helper function to make the sample names pretty and workable
+# Helper function to make the sample names pretty and workable.
+#
+# `samples` in the config is now a proper YAML sequence, so this normally
+# receives a character vector and just needs light cleanup. The legacy path
+# (a single dash/quote-delimited string) is still handled for back-compat, so
+# old config files don't break.
 sanitize_sample_names <- function(formatted.samples){
 
-  ids <- formatted.samples
-  
-  # Use sub instead of gsub in the first call. gsub replaces all, while sub 
-  # only replaces the first instance. The first dash is just there as formatting
-  # in the config file. This allows for names with dashes in them.
-  ids <- sub("^-", "", ids)
-  ids <- gsub("\ -", "\ ", ids)
-  ids <- gsub("\"", "", ids)
-  ids <- strsplit(ids, "[[:space:]]")
-  ids <- unlist(ids)
-  
-  
-  ids
+  ids <- unlist(formatted.samples, use.names = FALSE)
 
+  # Legacy single-string format, e.g.  -"Sample1" -"Sample2"
+  if (length(ids) == 1 && grepl("[[:space:]\"]|^-", ids)) {
+    ids <- sub("^-", "", ids)          # strip only the leading formatting dash
+    ids <- gsub(" -", " ", ids)        # collapse the " -" separators
+    ids <- gsub("\"", "", ids)         # drop quotes
+    ids <- unlist(strsplit(ids, "[[:space:]]+"))
+  }
+
+  # Common cleanup for both paths: trim whitespace, drop quotes/empties.
+  ids <- trimws(gsub("\"", "", ids))
+  ids <- ids[nzchar(ids)]
+
+  if (length(ids) == 0) stop("No sample names could be parsed from the config 'samples' entry.")
+
+  ids
 }
 
 
-# This got complicated as I was learning about how ggsave saves images (i.e. 
+# This got complicated as I was learning about how ggsave saves images (i.e.
 # be default it saves huge images) and how the pdf rendering presents those
 # images (i.e. it makes them huge if they're save huge)
 save_png_plot <- function(p, filename, ggplot.dir,
                           width = 7, height = 5, dpi = 150) {
 
-	# cfg <- get_report_cfg()
-	# dir <- cfg$ggplot.dir 
-	
-	if (!dir.exists(ggplot.dir)) dir.create(ggplot.dir, recursive = TRUE, showWarnings = FALSE) 
-	out <- file.path(ggplot.dir,  filename) 
+	if (!dir.exists(ggplot.dir)) dir.create(ggplot.dir, recursive = TRUE, showWarnings = FALSE)
+	out <- file.path(ggplot.dir,  filename)
 	print(out)
-	
-	# works for ggplot or any grid grob via cowplot::ggdraw 
-	if (inherits(p, "ggplot")) { 
-		ggplot2::ggsave(out, plot = p, width = width, height = height, 
-				units = "in", dpi = dpi, limitsize = TRUE) 
-	} else if (!is.null(p$gtable)) { # pheatmap object 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		grid::grid.newpage(); grid::grid.draw(p$gtable); dev.off() 
-	} else if (inherits(p, "grob") || inherits(p, "gTree")) { 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		grid::grid.newpage(); grid::grid.draw(p); dev.off() 
-	} else { 
-		# last resort: try plotting it 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		print(p); dev.off() 
-	} 
-	invisible(out) 
+
+	# works for ggplot or any grid grob via cowplot::ggdraw
+	if (inherits(p, "ggplot")) {
+		ggplot2::ggsave(out, plot = p, width = width, height = height,
+				units = "in", dpi = dpi, limitsize = TRUE)
+	} else if (!is.null(p$gtable)) { # pheatmap object
+		png(out, width = width, height = height, units = "in", res = dpi)
+		grid::grid.newpage(); grid::grid.draw(p$gtable); dev.off()
+	} else if (inherits(p, "grob") || inherits(p, "gTree")) {
+		png(out, width = width, height = height, units = "in", res = dpi)
+		grid::grid.newpage(); grid::grid.draw(p); dev.off()
+	} else {
+		# last resort: try plotting it
+		png(out, width = width, height = height, units = "in", res = dpi)
+		print(p); dev.off()
+	}
+	invisible(out)
 }
 
 
 # Filter out the metrics we don't want, and format everything nicely
 make_qc_table <- function(ids, dataset.path){
-  
-	d10x.metrics <- lapply(ids, function(sample.name){ 
-				       metrics.path.cleaned <- file.path(dataset.path, sample.name, "metrics_summary.csv") 
-				       metrics.path.raw     <- file.path(dataset.path, sample.name, "outs/metrics_summary.csv") 
-				       tryCatch({ 
-					       if (file.exists(metrics.path.cleaned)) { 
-						       read.csv(metrics.path.cleaned, colClasses = "character") 
-					       } else if (file.exists(metrics.path.raw)) { 
-						       read.csv(metrics.path.raw, colClasses = "character") 
-					       } else { 
-						       data.frame() 
-					       } 
-				       }, error = function(cond){ 
-					       message(paste0("Error loading the sample ", sample.name, ": ", conditionMessage(cond))) 
-					       data.frame() 
-				       }) 
+
+	d10x.metrics <- lapply(ids, function(sample.name){
+				       metrics.path.cleaned <- file.path(dataset.path, sample.name, "metrics_summary.csv")
+				       metrics.path.raw     <- file.path(dataset.path, sample.name, "outs/metrics_summary.csv")
+				       tryCatch({
+					       if (file.exists(metrics.path.cleaned)) {
+						       read.csv(metrics.path.cleaned, colClasses = "character")
+					       } else if (file.exists(metrics.path.raw)) {
+						       read.csv(metrics.path.raw, colClasses = "character")
+					       } else {
+						       data.frame()
+					       }
+				       }, error = function(cond){
+					       message(paste0("Error loading the sample ", sample.name, ": ", conditionMessage(cond)))
+					       data.frame()
+				       })
 				})
 
-	# --- Make them a data.frame --- 
-	experiment.metrics <- do.call("rbind", d10x.metrics) 
-	rownames(experiment.metrics) <- ids 
-	df <- if (inherits(experiment.metrics, "data.frame")) { 
-		experiment.metrics 
-	} else { 
-		as.data.frame(do.call(rbind, experiment.metrics), stringsAsFactors = FALSE) 
-	} 
+	# --- Make them a data.frame, keyed by sample ---
+	# Bind on a Sample column rather than rownames: rownames(df) <- ids throws
+	# when a sample's metrics_summary.csv is missing (empty data.frame) or when
+	# column sets differ between samples. Tag each frame with its sample first,
+	# then bind by name so mismatched/absent samples degrade gracefully.
+	names(d10x.metrics) <- ids
+	d10x.metrics <- Filter(function(x) nrow(x) > 0, d10x.metrics)
+	if (length(d10x.metrics) == 0) {
+		warning("No metrics_summary.csv files could be read for any sample; returning empty QC table.")
+		return(data.frame(metric = character(0)))
+	}
+	dropped <- setdiff(ids, names(d10x.metrics))
+	if (length(dropped) > 0) {
+		message("No metrics_summary.csv found for: ", paste(dropped, collapse = ", "),
+			" — these samples are omitted from the QC metrics table.")
+	}
+	for (s in names(d10x.metrics)) d10x.metrics[[s]]$.sample <- s
+	df <- dplyr::bind_rows(d10x.metrics)   # tolerant of differing columns
+	rownames(df) <- df$.sample
+	df$.sample <- NULL
 
-	# --- Keep only desired metrics --- 
-	keep <- c("Estimated.Number.of.Cells", 
-		  "Mean.Reads.per.Cell", 
-		  "Median.Genes.per.Cell", 
-		  "Valid.Barcodes") 
-	df_sub <- df[, keep, drop = FALSE] 
-	
-	# --- Prettify metric names --- 
-	pretty_names <- function(x) { 
-		s <- gsub("\\.", " ", x) 
-		s <- tolower(s) 
-		substr(s, 1, 1) <- toupper(substr(s, 1, 1)) 
-		s 
-	} 
+	# --- Keep only desired metrics (only those actually present) ---
+	keep <- c("Estimated.Number.of.Cells",
+		  "Mean.Reads.per.Cell",
+		  "Median.Genes.per.Cell",
+		  "Valid.Barcodes")
+	keep_present <- intersect(keep, colnames(df))
+	missing_cols <- setdiff(keep, colnames(df))
+	if (length(missing_cols) > 0) {
+		message("QC metrics not found in metrics_summary.csv (CellRanger version drift?): ",
+			paste(missing_cols, collapse = ", "))
+	}
+	if (length(keep_present) == 0) {
+		warning("None of the expected QC metric columns were found; returning empty QC table.")
+		return(data.frame(metric = character(0)))
+	}
+	df_sub <- df[, keep_present, drop = FALSE]
+
+	# --- Prettify metric names ---
+	pretty_names <- function(x) {
+		s <- gsub("\\.", " ", x)
+		s <- tolower(s)
+		substr(s, 1, 1) <- toupper(substr(s, 1, 1))
+		s
+	}
 	colnames(df_sub) <- pretty_names(colnames(df_sub))
-  
- 
-	# --- Transpose; put 'metric' first --- 
-	qc.table <- t(df_sub) 
-	qc.table <- as.data.frame(qc.table, stringsAsFactors = FALSE) 
-	qc.table$metric <- rownames(qc.table) 
-	row.names(qc.table) <- NULL 
+
+
+	# --- Transpose; put 'metric' first ---
+	qc.table <- t(df_sub)
+	qc.table <- as.data.frame(qc.table, stringsAsFactors = FALSE)
+	qc.table$metric <- rownames(qc.table)
+	row.names(qc.table) <- NULL
 	qc.table <- qc.table[, c(ncol(qc.table), 1:(ncol(qc.table)-1))]
-  
-  	# --- Order metrics (optional) --- 
-	metric_order <- c("Estimated number of cells", 
-			  "Mean reads per cell", 
-			  "Median genes per cell", 
-			  "Valid barcodes") 
-	qc.table <- qc.table %>% 
-		mutate(metric = factor(metric, levels = metric_order)) %>% 
-		arrange(metric) %>% 
+
+  	# --- Order metrics (optional) ---
+	metric_order <- c("Estimated number of cells",
+			  "Mean reads per cell",
+			  "Median genes per cell",
+			  "Valid barcodes")
+	qc.table <- qc.table %>%
+		mutate(metric = factor(metric, levels = metric_order)) %>%
+		arrange(metric) %>%
 		mutate(metric = as.character(metric))
-	# return 
+	# return
 	qc.table
 }
 
 
-# This is mostly used for putting the sample names in the right order so things are consistant in the plots
-make_metric_table_from_list <- function(seurat.list, 
-					metric, 
-					sample_levels = NULL, 
-					sort_alpha = TRUE) { 
-	df <- do.call(rbind, lapply(names(seurat.list), function(s) { 
-					    so <- seurat.list[[s]] 
-					    stopifnot(metric %in% colnames(so[[]])) 
-					    data.frame(Sample = s, value = so[[metric, drop = TRUE]], 
-						       row.names = colnames(so), check.names = FALSE) 
-				       })) 
-	names(df)[2] <- metric 
+# This is mostly used for putting the sample names in the right order so things
+# are consistent in the plots
+make_metric_table_from_list <- function(seurat.list,
+					metric,
+					sample_levels = NULL,
+					sort_alpha = TRUE) {
+	df <- do.call(rbind, lapply(names(seurat.list), function(s) {
+					    so <- seurat.list[[s]]
+					    stopifnot(metric %in% colnames(so[[]]))
+					    data.frame(Sample = s, value = so[[metric, drop = TRUE]],
+						       row.names = colnames(so), check.names = FALSE)
+				       }))
+	names(df)[2] <- metric
 
-	if (!is.null(sample_levels)) { 
-		df$Sample <- factor(df$Sample, levels = sample_levels) 
-	} else if (sort_alpha) { 
-		df$Sample <- factor(df$Sample, levels = sort(unique(df$Sample))) 
-	} else { 
+	if (!is.null(sample_levels)) {
+		df$Sample <- factor(df$Sample, levels = sample_levels)
+	} else if (sort_alpha) {
+		df$Sample <- factor(df$Sample, levels = sort(unique(df$Sample)))
+	} else {
 		df$Sample <- factor(df$Sample, levels = unique(df$Sample))
   }
-  
+
   df
 }
 
@@ -185,7 +193,7 @@ make_metric_table <- function(obj, sample_col, metric, sample_levels = NULL, sor
     check.names = FALSE
   )
   names(out)[2] <- metric
-  
+
   if (!is.null(sample_levels)) {
     out$Sample <- factor(as.character(out$Sample), levels = sample_levels)
   } else if (sort_alpha) {
@@ -204,10 +212,12 @@ make_metric_table <- function(obj, sample_col, metric, sample_levels = NULL, sor
 render_formatted_table <- function(input.df) {
   # ---- format numbers (no manual LaTeX) ----
   num_only <- function(x) as.numeric(gsub("[^0-9.]", "", x))
-  
+
   fmt_one_cell <- function(metric, val_chr){
     if (is.na(val_chr) || val_chr == "") return(NA_character_)
     if (identical(metric, "Valid barcodes")){
+      # CellRanger stores Valid Barcodes as a percentage integer (e.g. "93") so
+      # dividing by 100 converts it to a proportion for percent().
       v <- num_only(val_chr) / 100
       if (is.na(v)) return(NA_character_)
       percent(v, accuracy = 0.1)                # e.g. "93.8%"
@@ -217,13 +227,13 @@ render_formatted_table <- function(input.df) {
       comma(v)                                   # e.g. "24,047"
     }
   }
-  
+
   for (j in 2:ncol(input.df)) {
     input.df[[j]] <- mapply(fmt_one_cell, input.df$metric, input.df[[j]])
   }
   input.df[is.na(input.df)] <- ""
   input.df[] <- lapply(input.df, as.character)
-  
+
   # ---- render (escape TRUE) ----
   input.df %>%
     rename(Metric = metric) %>%
@@ -244,96 +254,77 @@ render_formatted_table <- function(input.df) {
 
 
 # helper to locate 10x paths
-read_10x_any <- function(sample.name, dataset.path) {
-	# cfg <- get_report_cfg()
-	# dataset.path <- cfg$dataset.path
-
-	if (dir.exists(file.path(dataset.path, sample.name, "outs"))){ 
-		# tenx.h5.path     <- file.path(dataset.path, sample.name, "outs/raw_feature_bc_matrix.h5") 
-		tenx.matrix.path <- file.path(dataset.path, sample.name, "outs/raw_feature_bc_matrix") 
-	} else { 
-		# tenx.h5.path     <- file.path(dataset.path, sample.name, "raw_feature_bc_matrix.h5") 
-		tenx.matrix.path <- file.path(dataset.path, sample.name, "raw_feature_bc_matrix") 
-	} 
-
-	# if (isTRUE(import.h5) && file.exists(tenx.h5.path)) { 
-	# 	Read10X_h5(tenx.h5.path) 
-	# } else { 
-		Read10X(tenx.matrix.path)
-#   }
-}
-
-# Remove Y chromosome genes first
-read_10x_no_Y_chr <- function(sample.name,
-                              y_genes_file = "y_genes_symbols.txt",
-                              verbose = TRUE) {
-  # 1) Resolve paths exactly as in read_10x_any
-  if (dir.exists(file.path(dataset.path, sample.name, "outs"))) {
-    tenx.h5.path     <- file.path(dataset.path, sample.name, "outs/raw_feature_bc_matrix.h5")
-    tenx.matrix.path <- file.path(dataset.path, sample.name, "outs/raw_matrix")
+read_10x_any <- function(sample.name, dataset.path, run.soupx, type = "auto") {
+  # Define all possible paths
+  raw_paths  <- file.path(dataset.path, sample.name, c("outs/raw_feature_bc_matrix", "raw_feature_bc_matrix"))
+  filt_paths <- file.path(dataset.path, sample.name, c("outs/filtered_feature_bc_matrix", "filtered_feature_bc_matrix"))
+  selected_path <- NULL
+  # --- Logic Gate ---
+  # 1. User specifically wants RAW
+  if (type == "raw") {
+    selected_path <- raw_paths[dir.exists(raw_paths)][1]
+    if (is.na(selected_path)) stop("Raw matrix requested but not found for: ", sample.name)
+    # 2. User specifically wants FILTERED
+  } else if (type == "filtered") {
+    selected_path <- filt_paths[dir.exists(filt_paths)][1]
+    if (is.na(selected_path)) stop("Filtered matrix requested but not found for: ", sample.name)
+    # 3. Default "auto" behavior: Try raw, then filtered
   } else {
-    tenx.h5.path     <- file.path(dataset.path, sample.name, "raw_feature_bc_matrix.h5")
-    tenx.matrix.path <- file.path(dataset.path, sample.name, "raw_matrix")
-  }
-  
-  # 2) Load Y-chromosome gene names (symbols)
-  if (!file.exists(y_genes_file)) {
-    stop("Y gene list file not found: ", y_genes_file)
-  }
-  y_genes <- readLines(y_genes_file)
-  y_genes <- unique(y_genes[y_genes != ""])
-  
-  if (verbose) {
-    message("Loaded ", length(y_genes), " Y-chromosome gene symbols from: ", y_genes_file)
-  }
-  
-  # 3) Read 10x data (h5 if requested and present)
-  if (isTRUE(import.h5) && file.exists(tenx.h5.path)) {
-    mat <- Read10X_h5(tenx.h5.path)
-  } else {
-    mat <- Read10X(tenx.matrix.path)
-  }
-  
-  # 4) Remove Y genes from the matrix (or list of matrices)
-  drop_y <- function(m) {
-    if (is.null(rownames(m))) {
-      warning("Matrix has no rownames; cannot drop Y genes reliably.")
-      return(m)
+    if (any(dir.exists(raw_paths))) {
+      selected_path <- raw_paths[dir.exists(raw_paths)][1]
+      message("Auto-detected: Using RAW matrix for ", sample.name)
+    } else if (any(dir.exists(filt_paths))) {
+      selected_path <- filt_paths[dir.exists(filt_paths)][1]
+      message("Auto-detected: Using FILTERED matrix for ", sample.name)
     }
-    is_y <- rownames(m) %in% y_genes
-    n_y  <- sum(is_y)
-    if (verbose) {
-      message("  Found ", n_y, " Y-chromosome genes in this feature set; removing them.")
-    }
-    m[!is_y, , drop = FALSE]
   }
-  
-  if (is.list(mat)) {
-    # multi-modal object: apply to each
-    mat <- lapply(mat, drop_y)
-  } else {
-    mat <- drop_y(mat)
+  # --- Final Execution ---
+  if (is.null(selected_path) || is.na(selected_path)) {
+    stop("Could not locate any 10x matrix folders for sample: ", sample.name)
   }
-  
-  return(mat)
-}
-read_pipseeker_any <- function(sample.name) {
-  if (dir.exists(file.path(dataset.path, sample.name, "outs"))){
-    tenx.h5.path     <- file.path(dataset.path, sample.name, "outs/raw_feature_bc_matrix.h5")
-    tenx.matrix.path <- file.path(dataset.path, sample.name, "outs/raw_matrix")
-  } else {
-    tenx.h5.path     <- file.path(dataset.path, sample.name, "raw_feature_bc_matrix.h5")
-    tenx.matrix.path <- file.path(dataset.path,sample.name, "raw_matrix") # for pipseeker
-    
-    # tenx.matrix.path <- file.path(dataset.path, sample.name, "raw_feature_bc_matrix")
-  }
-  if (isTRUE(import.h5) && file.exists(tenx.h5.path)) {
-    Read10X_h5(tenx.h5.path)
-  } else {
-    Read10X(tenx.matrix.path)
-  }
-}
+  message("Loading data from: ", selected_path)
 
+  # --- SoupX ---
+  if (run.soupx) {
+    # SoupX requires both raw and filtered matrices
+    raw_path <- raw_paths[dir.exists(raw_paths)][1]
+    filt_path <- filt_paths[dir.exists(filt_paths)][1]
+    if (is.na(raw_path))  stop("SoupX requires a raw matrix, but none was found for: ",      sample.name, " at ", raw_path)
+    if (is.na(filt_path)) stop("SoupX requires a filtered matrix, but none was found for: ", sample.name)
+    message("Running SoupX for: ", sample.name)
+
+    tod <- Read10X(data.dir = raw_path)   # Table of Droplets (all barcodes)
+    toc <- Read10X(data.dir = filt_path)  # Table of Counts  (cell barcodes only)
+    sc  <- SoupChannel(tod, toc)
+
+    rm(tod); gc()  # free the large raw matrix immediately
+
+    # downsample to keep memory manageable
+    max.cells.for.clustering <- 5000
+    if (ncol(toc) > max.cells.for.clustering) {
+      set.seed(42)
+      cells.to.use <- sample(colnames(toc), max.cells.for.clustering)
+    } else {
+      cells.to.use <- colnames(toc)
+    }
+
+    # Cluster cells within SoupX using a basic Seurat workflow,
+    # as SoupX needs cluster labels to estimate the contamination fraction
+    tmp <- CreateSeuratObject(counts = toc)
+    tmp <- NormalizeData(tmp,                          verbose = FALSE)
+    tmp <- FindVariableFeatures(tmp, nfeatures = 1000, verbose = FALSE)
+    tmp <- ScaleData(tmp,                              verbose = FALSE)
+    tmp <- RunPCA(tmp, npcs = 10,                      verbose = FALSE)
+    tmp <- FindNeighbors(tmp, dims = 1:10, k.param = 10, verbose = FALSE)
+    tmp <- FindClusters(tmp, resolution = 0.3,         verbose = FALSE)
+    sc  <- setClusters(sc, setNames(tmp$seurat_clusters, colnames(tmp)))
+
+    sc  <- autoEstCont(sc, verbose = FALSE)
+    return(adjustCounts(sc, roundToInt = TRUE))
+  }
+
+  Read10X(data.dir = selected_path)
+}
 
 vln_boxplot <- function(data, x, y, title) {
   p <- ggplot(data, aes(x = {{ x }}, y = {{ y }})) +
@@ -345,12 +336,12 @@ vln_boxplot <- function(data, x, y, title) {
   p
 }
 
-shaded_vln_boxplot <- function(data, 
-                               x, 
-                               y, 
-                               title, 
+shaded_vln_boxplot <- function(data,
+                               x,
+                               y,
+                               title,
                                show.outliers = TRUE,
-                               this_floor = -Inf, 
+                               this_floor = -Inf,
                                this_ceiling = Inf){
   ggplot(data, aes(x = {{x}}, y = {{y}})) +
     # shaded bands (put first so they sit behind the geoms)
@@ -367,6 +358,22 @@ shaded_vln_boxplot <- function(data,
 }
 
 
+# Single source of truth for marker-plot filenames. Both the writer
+# (feat_plots_top_genes, part 2) and the reader (part 3 summary) call this, so
+# the two can never disagree on the suffix/assay/cluster naming scheme.
+marker_plot_path <- function(ggplot.dir,
+                             cluster.num,
+                             kind = c("feat", "vln"),
+                             assay.used = "SCT",
+                             filename.suffix = "") {
+  kind <- match.arg(kind)
+  tag  <- if (kind == "feat") "featPlot" else "vlnPlot"
+  fn   <- paste0("clustering_", filename.suffix,
+                 "_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png")
+  file.path(ggplot.dir, fn)
+}
+
+
 feat_plots_top_genes <- function(cluster.num,
                                  seurat.obj,
                                  marker.genes.df,
@@ -377,47 +384,40 @@ feat_plots_top_genes <- function(cluster.num,
                                  fig_width = 9,     # inches
                                  fig_height = 10,    # inches
                                  dpi = 150,
+                                 num_cols = 3,
                                  umap_pt_size = 0.02,
                                  vln_pt_size = 0.05,
-                                 base_text = 10) {
-  
-	# cfg <- get_report_cfg()
-	# ggplot.dir <- cfg$ggplot.dir
+                                 base_text = 10,
+                                 this_reduction = "umap.postint",
+                                 to_raster=FALSE) {
+
   if (!dir.exists(ggplot.dir)) dir.create(ggplot.dir, recursive = TRUE, showWarnings = FALSE)
-  
-  # paths
-  feat.plot.path <- file.path(ggplot.dir,
-                              paste0("clustering_", 
-                                     filename.suffix, 
-                                     "_marker_gene_featPlot_cl_", 
-                                     cluster.num, 
-                                     "_", assay.used, ".png"))
-  vln.plot.path  <- file.path(ggplot.dir,
-                              paste0("clustering_", 
-                                     filename.suffix, 
-                                     "_marker_gene_vlnPlot_cl_", 
-                                     cluster.num, 
-                                     "_", assay.used, ".png"))
-  
+
+  # paths (via shared helper so part 3 can reconstruct them identically)
+  feat.plot.path <- marker_plot_path(ggplot.dir, cluster.num, "feat", assay.used, filename.suffix)
+  vln.plot.path  <- marker_plot_path(ggplot.dir, cluster.num, "vln",  assay.used, filename.suffix)
+
   # gene list
   curr.markers <- marker.genes.df[marker.genes.df$cluster == cluster.num, ]
   genes <- na.omit(curr.markers$gene)
   genes <- genes[seq_len(min(length(genes), genes_per_page))]
-  
+
   # ---------- FEATURE PLOTS (rasterized) ----------
+  if ("patchwork" %in% (.packages())) detach("package:patchwork", unload = TRUE)
+
   fp_list <- Seurat::FeaturePlot(
     seurat.obj,
     features   = genes,
-    reduction  = "umap.postint",
+    reduction  = this_reduction,
     cols       = c("grey85", "navy"),
-    ncol       = 3,
+    ncol       = num_cols,
     pt.size    = umap_pt_size,
     label.size = base_text,
-    combine    = FALSE
-    # raster     = TRUE,        # <- key for file size & speed
-    # raster.dpi = c(dpi, dpi)
+    combine    = FALSE,
+    raster     = to_raster,        # <- key for file size & speed
+    raster.dpi = c(dpi, dpi)
   )
-  
+
   fp_list <- lapply(fp_list, function(p) {
     p +
       theme(
@@ -426,20 +426,20 @@ feat_plots_top_genes <- function(cluster.num,
         plot.title  = element_text(size = base_text + 1)
       )
   })
-  
+
   fp_grid <- cowplot::plot_grid(plotlist = fp_list, ncol = 3)
   title_g <- cowplot::ggdraw() + cowplot::draw_label(
     paste0("Cluster ", cluster.num, " — top marker features"),
     fontface = "bold", size = base_text + 2
   )
   fp_final <- cowplot::plot_grid(title_g, fp_grid, ncol = 1, rel_heights = c(0.12, 1))
-  
+
   ggplot2::ggsave(
     filename = feat.plot.path, plot = fp_final,
     width = fig_width, height = fig_height, units = "in",
     dpi = dpi, limitsize = TRUE
   )
-  
+
   # ---------- VIOLIN PLOTS ----------
   vp_list <- Seurat::VlnPlot(
     object   = seurat.obj,
@@ -447,7 +447,7 @@ feat_plots_top_genes <- function(cluster.num,
     pt.size  = vln_pt_size,
     combine  = FALSE
   )
-  
+
   vp_list <- lapply(vp_list, function(p) {
     p +
       theme(
@@ -456,19 +456,19 @@ feat_plots_top_genes <- function(cluster.num,
         plot.title  = element_text(size = base_text + 1)
       )
   })
-  
-  vp_grid  <- cowplot::plot_grid(plotlist = vp_list, ncol = 3)
+
+  vp_grid  <- cowplot::plot_grid(plotlist = vp_list, ncol = num_cols)
   title_v  <- cowplot::ggdraw() + cowplot::draw_label(
     paste0("Cluster ", cluster.num, " — top marker violins"),
     fontface = "bold", size = base_text + 2
   )
   vp_final <- cowplot::plot_grid(title_v, vp_grid, ncol = 1, rel_heights = c(0.12, 1))
-  
+
   ggplot2::ggsave(
     filename = vln.plot.path, plot = vp_final,
     width = fig_width, height = fig_height, units = "in",
     dpi = dpi, limitsize = TRUE
   )
-  
+
   invisible(list(feature_plot = feat.plot.path, violin_plot = vln.plot.path))
 }
