@@ -1,33 +1,49 @@
 #!/usr/bin/env Rscript
 library(rmarkdown)
 
-args = commandArgs(trailingOnly=TRUE)
-# test if there is at least one argument: if not, return an error
-if (length(args)==0) {
-  stop("At least one argument must be supplied (report number)", call.=FALSE)
-} else if (length(args)==1) {
-  # default output file
-  args[2] = ""
+# Render one or more R Markdown reports, in the order given, against a single
+# config file. Each report renders in a fresh environment so later reports do
+# not inherit earlier ones' in-memory objects (they read their inputs from disk).
+#
+# Usage:
+#   Rscript execute_pipeline-Ex.R report1.Rmd [report2.Rmd ...]
+#
+# Config file:
+#   Defaults to config.yaml. Override with the CONFIG_FILE environment variable:
+#     CONFIG_FILE=config_test.yaml Rscript execute_pipeline-Ex.R part1.Rmd
+#
+# This is normally invoked through run_templates.sh (which forwards all of its
+# arguments here), not called directly.
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) == 0) {
+  stop("Supply one or more .Rmd report files to render, in order.", call. = FALSE)
 }
 
-# Call this script with run_templates.sh and pass it your arguments. The args below
-# are just an example. 
-user.report.num=args[1]
-user.suffix=args[2]
-
-
-render_report = function(suffix, template.filename){
-        config.file=paste0("config",  suffix, ".yaml")
-        # template.filename=paste0("scRNA_template_PART", report.num, ".Rmd")
-        # output.filename=paste0("report_part", report.num, suffix, "_output.html")
-	output.name <- gsub(".Rmd", ".pdf", template.filename)
-
-        rmarkdown::render(template.filename,
-                          params = list( config.args = config.file), 
-			  envir = new.env(parent = globalenv()), 
-                          output_file = output.name )
-
+config.file <- Sys.getenv("CONFIG_FILE", unset = "config.yaml")
+if (!file.exists(config.file)) {
+  stop("Config file not found: ", config.file,
+       " (set CONFIG_FILE to override the default config.yaml).", call. = FALSE)
 }
 
+render_report <- function(template.filename, config.file) {
+  if (!file.exists(template.filename)) {
+    stop("Report file not found: ", template.filename, call. = FALSE)
+  }
+  output.name <- gsub("\\.Rmd$", ".pdf", template.filename)
+  message("=================================================================")
+  message("Rendering ", template.filename, "  (config: ", config.file, ")")
+  message("=================================================================")
+  rmarkdown::render(
+    template.filename,
+    params      = list(config.args = config.file),
+    envir       = new.env(parent = globalenv()),
+    output_file = output.name
+  )
+}
 
-render_report(user.suffix, user.report.num)
+# Render sequentially. render() stops on error, so if an earlier report fails
+# (e.g. part 2a), the later ones (part 2b) are never run.
+for (rmd in args) render_report(rmd, config.file)
+
+message("All reports rendered.")
