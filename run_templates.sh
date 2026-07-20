@@ -18,16 +18,14 @@ module load geos/3.8.1
 module load hdf5/1.8.19-serial
 module load pandoc/2.2.1
 
-number=$1
-batch=$2
+rmd_file=$1
 
-echo -n  "Running pipeline with arguments report number = ${number}, batch control method = ${batch}, at "
+echo -n  "Running pipeline file ${rmd_file} at "
 date
 
-SECONDS=0
 
 # Rscript ${script}
-Rscript execute_pipeline-Ex.R ${number} ${batch}
+Rscript execute_pipeline-Ex.R ${rmd_file}
 
-duration=$SECONDS
-printf "\nProcessed in %.2f minutes\n" $(($duration / 60))
+echo -n "Done at "
+date
