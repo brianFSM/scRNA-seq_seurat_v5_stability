@@ -790,3 +790,14 @@ qc_attrition <- function(md, spec) {
     pct_of_total   = round(100 * n.fail / nrow(md), 2),
     row.names = NULL, stringsAsFactors = FALSE)
 }
+
+render_plain_table <- function(df, caption = NULL, align = NULL,
+                               col.names = NULL, font_size = 10) {
+  if (is.null(align))     align     <- c("l", rep("r", ncol(df) - 1))
+  if (is.null(col.names)) col.names <- gsub("_", " ", names(df))
+  df %>%
+    kable(format = "latex", booktabs = TRUE, align = align,
+          caption = caption, col.names = col.names, longtable = FALSE) %>%
+    kable_styling(latex_options = c("striped", "hold_position"),
+                  font_size = font_size)
+}

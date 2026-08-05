@@ -8,9 +8,7 @@
 - (In new project wizard) Version Control > Git 
 - Repository URL: https://github.com/brianFSM/scRNA-seq_seurat_V5.git
 
-After project is created, go to quest on the command line, navigate to the newly created repository folder (which should be a subdirectory in the directory of whatever project you're working on), and copy over the renv.lock file we have on quest. This will tell the project which versions of which packges you'll use:
-
-cp /projects/b1197/PROJECTS/Seurat_v5_renv/November_2025/renv.lock . 
+the renv.lock that is downloaded
 
 Go back to your project in the analytics node, and at the console:
 
@@ -27,9 +25,10 @@ If this is the first time you've ever run these reports, you will need to run th
 
 Finally, fill out your config file. 
 
+You can now run multiple templates in succession. 
 To run the templates from the command line on quest, do something like this:
 
-$ sbatch run_templates.sh scRNA_part1_QC.Rmd
+$ sbatch run_templates.sh scRNA_part1_QC.Rmd scRNA_part2a_integration.Rmd
 
-In this example, the output will be scRNA_part1_QC.pdf
+In this example, the output will be scRNA_part1_QC.pdf and scRNA_part2a_integration.pdf
 
