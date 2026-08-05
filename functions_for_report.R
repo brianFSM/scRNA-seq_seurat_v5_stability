@@ -210,6 +210,10 @@ make_metric_table <- function(obj, sample_col, metric, sample_levels = NULL, sor
 ################################################################################
 
 render_formatted_table <- function(input.df) {
+  if (!"metric" %in% names(input.df))
+    stop("render_formatted_table() expects a 'metric' column ",
+         "(it formats the CellRanger metrics table). Use render_plain_table() ",
+         "for general data frames.")
   # ---- format numbers (no manual LaTeX) ----
   num_only <- function(x) as.numeric(gsub("[^0-9.]", "", x))
   
@@ -631,4 +635,158 @@ select_resolution_by_stability <- function(obj,
             valid$resolution[which.max(valid$median)]
 
   list(summary = df, threshold = threshold, chosen_resolution = chosen)
+}
+
+################################################################################
+# Faceted QC plotting
+#
+# qc_long()          : stack the per-metric tables saved by part 1 into one
+#                      long frame (Sample, metric, value [, stage])
+# qc_thresholds()    : build the per-metric floor/ceiling frame from config
+# qc_facet_plot()    : one violin+box figure, faceted by metric (and stage)
+#
+# These replace the per-metric vln_boxplot()/shaded_vln_boxplot() calls. The
+# originals are kept for one-off single-metric plots elsewhere.
+################################################################################
+
+# Trim the longest common prefix off sample labels so 4+ samples stay legible
+# inside narrow facets (SFN5_KO_KPC99_F_N1 -> F_N1). Cuts back to the last
+# separator so tokens aren't split mid-word.
+short_sample_labels <- function(x) {
+  lv <- levels(factor(x))
+  if (length(lv) < 2) return(factor(x))
+  n <- min(nchar(lv)); i <- 0L
+  while (i < n && length(unique(substr(lv, i + 1L, i + 1L))) == 1L) i <- i + 1L
+  pre <- sub("[^_.\\-]*$", "", substr(lv[1], 1L, i))
+  if (nchar(pre) == 0L) return(factor(x))
+  k <- nchar(pre)
+  factor(substr(as.character(x), k + 1L, nchar(as.character(x))),
+         levels = substr(lv, k + 1L, nchar(lv)))
+}
+
+qc_long <- function(tables, stage = NULL, short.labels = TRUE) {
+  stopifnot(is.list(tables), !is.null(names(tables)))
+  out <- do.call(rbind, lapply(names(tables), function(nm) {
+    d <- tables[[nm]]
+    vcol <- setdiff(names(d), "Sample")[1]
+    data.frame(Sample = as.character(d$Sample),
+               metric = nm,
+               value  = d[[vcol]],
+               row.names = NULL, check.names = FALSE)
+  }))
+  out$metric <- factor(out$metric, levels = names(tables))
+  out$Sample <- if (short.labels) short_sample_labels(out$Sample) else factor(out$Sample)
+  if (!is.null(stage)) out$stage <- factor(stage, levels = c("raw", "filtered"))
+  out
+}
+
+# spec: named list, e.g. list(nCount_RNA = c(lower = 500, upper = 25000),
+#                            percent.mt  = c(upper = 5))
+qc_thresholds <- function(spec, metric.levels) {
+  do.call(rbind, lapply(names(spec), function(nm) {
+    v <- spec[[nm]]
+    grab <- function(k) if (is.na(v[k]) || is.null(v[k])) NA_real_ else as.numeric(v[k])
+    data.frame(metric = factor(nm, levels = metric.levels),
+               lower  = grab("lower"),
+               upper  = grab("upper"))
+  }))
+}
+
+qc_facet_plot <- function(dat,
+                          thresholds    = NULL,
+                          log.y         = FALSE,
+                          facet.nrow    = 1,
+                          title         = NULL,
+                          drop.inactive = TRUE,
+                          shade.stage   = "raw") {
+
+  by.stage <- "stage" %in% names(dat)
+
+  # A bound that excludes zero cells is not a filter. Blank it so red shading
+  # always means "cells are removed here" (config ships rbc_ceiling = 100 and
+  # ribo_floor = 0, neither of which cuts anything).
+  if (!is.null(thresholds) && drop.inactive) {
+    for (i in seq_len(nrow(thresholds))) {
+      v <- dat$value[dat$metric == thresholds$metric[i]]
+      if (!is.na(thresholds$lower[i]) && !any(v < thresholds$lower[i], na.rm = TRUE))
+        thresholds$lower[i] <- NA_real_
+      if (!is.na(thresholds$upper[i]) && !any(v > thresholds$upper[i], na.rm = TRUE))
+        thresholds$upper[i] <- NA_real_
+    }
+  }
+
+  p <- ggplot(dat, aes(x = Sample, y = value))
+
+  if (!is.null(thresholds)) {
+    lo <- thresholds[!is.na(thresholds$lower), , drop = FALSE]
+    hi <- thresholds[!is.na(thresholds$upper), , drop = FALSE]
+    if (by.stage) {
+      st <- factor(shade.stage, levels = levels(dat$stage))
+      if (nrow(lo)) lo$stage <- st
+      if (nrow(hi)) hi$stage <- st
+    }
+    if (nrow(lo)) p <- p +
+      geom_rect(data = lo, inherit.aes = FALSE,
+                aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = lower),
+                fill = "red", alpha = 0.08) +
+      geom_hline(data = lo, inherit.aes = FALSE, aes(yintercept = lower),
+                 colour = "red", linetype = "dashed", linewidth = 0.5)
+    if (nrow(hi)) p <- p +
+      geom_rect(data = hi, inherit.aes = FALSE,
+                aes(xmin = -Inf, xmax = Inf, ymin = upper, ymax = Inf),
+                fill = "red", alpha = 0.08) +
+      geom_hline(data = hi, inherit.aes = FALSE, aes(yintercept = upper),
+                 colour = "red", linetype = "dashed", linewidth = 0.5)
+  }
+
+  # scale = "width" is the fix for the current plots: a handful of cells at
+  # percent.mt ~95 or nCount ~175k otherwise squash every violin into a sliver.
+  p <- p +
+    geom_violin(scale = "width", fill = NA, linewidth = 0.3) +
+    geom_boxplot(width = 0.12, fill = NA, linewidth = 0.3,
+                 outlier.size = 0.15, outlier.alpha = 0.25)
+
+  p <- p + if (by.stage) {
+    facet_grid(metric ~ stage, scales = "free_y", switch = "y")
+  } else {
+    facet_wrap(~ metric, scales = "free_y", nrow = facet.nrow)
+  }
+
+  if (log.y) p <- p + scale_y_log10(
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()))
+
+  p +
+    labs(title = title, x = NULL, y = NULL) +
+    theme(axis.text.x  = element_text(angle = 45, hjust = 1, size = 7),
+          strip.text   = element_text(size = 8),
+          panel.spacing = unit(0.6, "lines"))
+}
+
+qc_attrition <- function(md, spec) {
+  miss <- setdiff(names(spec), names(md))
+  if (length(miss)) stop("metrics not found in metadata: ", paste(miss, collapse = ", "))
+
+  fails <- vapply(names(spec), function(nm) {
+    v <- md[[nm]]; b <- spec[[nm]]
+    f <- rep(FALSE, length(v))
+    # guard NA: v < bound yields NA, which propagates into colSums
+    if (!is.na(b["lower"])) f <- f | (!is.na(v) & v < b["lower"])
+    if (!is.na(b["upper"])) f <- f | (!is.na(v) & v > b["upper"])
+    f
+  }, logical(nrow(md)))
+
+  n.crit <- rowSums(fails)
+  n.fail <- colSums(fails)
+
+  data.frame(
+    criterion      = names(spec),
+    # "min"/"max" instead of >=/<=: avoids LaTeX text-mode angle brackets
+    bound          = vapply(spec, function(b) paste(c(
+                       if (!is.na(b["lower"])) paste0("min ", b["lower"]),
+                       if (!is.na(b["upper"])) paste0("max ", b["upper"])),
+                       collapse = ", "), ""),
+    cells_lost     = n.fail,
+    lost_only_here = colSums(fails & n.crit == 1),
+    pct_of_total   = round(100 * n.fail / nrow(md), 2),
+    row.names = NULL, stringsAsFactors = FALSE)
 }
