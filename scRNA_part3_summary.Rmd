@@ -55,10 +55,16 @@ if (metrics.table.string == "FALSE"){
   run_metrics_tables=FALSE
 }
 
+cfg <- config.args
+cfg.analysis <- cfg$analysis
+
+p1  <- cfg.analysis$part1
+p2 <- cfg.analysis$part2
 
 ################################################################################
 # set project variables
 ################################################################################
+part2.suffix <- p2$part2_suffix
 analyst.name <- config.args$project$`analyst-name`
 formatted.samples <- config.args$project$samples # Sanitized below
 experiment.name = config.args$project$`project-name` 
@@ -77,17 +83,19 @@ r.obj.loc <- config.args$data$`rds-file-path` # Output folder
 
 # When trying different parameters in the analysis you can create
 # alternate output files with this 'suffix' argument in the config
-part1.suffix <- config.args$analysis$part1$part1_suffix
+part1.suffix <- p1$part1_suffix
 
 unfiltered.seurat.obj.file <- config.args$analysis$part1$unfiltered_seurat_obj_file
 unfiltered.seurat.obj.file <- sub(".RDS", paste0(part1.suffix, ".RDS"), unfiltered.seurat.obj.file )
 unfiltered.seurat.obj.path <- file.path(r.obj.loc, unfiltered.seurat.obj.file)
 
-QC.tables.file <- config.args$analysis$part1$part1_report_tables_filename
+QC.tables.file <- p1$part1_report_tables_filename
 QC.tables.file <-sub(".RData", paste0(part1.suffix, ".RData"), QC.tables.file)
 QC.tables.path <-file.path(r.obj.loc, QC.tables.file)
+part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, part2.suffix)
 
-ggplot.directory.name <- config.args$analysis$part1$ggplot_dir
+
+ggplot.directory.name <- p1$ggplot_dir
 ggplot.directory <- file.path(r.obj.loc, ggplot.directory.name)
 
 # create ggplot folder if it doesn't exist already
@@ -123,7 +131,7 @@ This summary report was generated on `r formatted.date`
 
 ## Sample Names
 
-`r formatted.samples `
+`r paste(paste0("- ", formatted.samples), collapse = "\n")`
 
 
 # Part 1: QC
@@ -141,126 +149,61 @@ qc.table <- make_qc_table(ids, dataset.path)
 render_formatted_table(qc.table)
 ```
 
+\blandscape
+
 ## scRNA-seq QC
 
-## Pre-filter plots
+Distributions before and after filtering. Left column raw, red shading marks
+the excluded range; right column post-filter. Cell counts per sample are in the filtering table below.
 
-These plots show select metrics of the raw data. Red-shaded areas represent what
-will be filtered out before downstream analysis
 
-### Number of reads per cell raw
 
-```{r plot_nCount_shaded }
-nCount.shaded.path <- file.path(ggplot.directory, "nCount_RNA_shaded_vln.png")
-
-knitr::include_graphics(nCount.shaded.path)
+```{r qc_figures, out.width='100%'}
+knitr::include_graphics(file.path(ggplot.directory,
+  c("qc_counts_before_after.png", "qc_percent_before_after.png")))
 ```
 
+\elandscape
 
-### Number of genes per cell raw 
-
-```{r p_nFeature_plot}
-
-nFeat.shaded.path <- file.path(ggplot.directory,  "nFeature_RNA_shaded_vln.png")
-
-knitr::include_graphics(nFeat.shaded.path)
-```
-
-### Percent mitochondrial expression raw
-
-```{r pct_mito_plot}
-pct.mito.shaded.path <- file.path(ggplot.directory,  "percent_mt_shaded_vln.png")
-
-knitr::include_graphics(pct.mito.shaded.path)
-```
-
-### Percent RBC expression raw
-
-```{r pct_hb_plot}
-
-pct.rbc.shaded.path <- file.path(ggplot.directory,  "percent_hb_shaded_vln.png")
-
-knitr::include_graphics(pct.rbc.shaded.path)
-
-```
-### Percent ribo gene expression raw
-
-```{r pct_ribo_plot}
-
-pct.ribo.shaded.path <- file.path(ggplot.directory,  "percent_ribo_shaded_vln.png")
-
-knitr::include_graphics(pct.ribo.shaded.path)
-
-```
-
-## Post-filtering plots
-
-### Distribution of the number of reads, after filter
-
-```{r p_nCount_filt}
-nCount.filt.path <- file.path(ggplot.directory, "nCount_RNA_filt.png")
-
-knitr::include_graphics(nCount.filt.path)
-
-```
-### Number of genes per cell after filtering 
-
-```{r p_nFeature_filt_plot}
-
-nFeat.filt.path <- file.path(ggplot.directory,  "nFeature_RNA_filt.png")
-
-knitr::include_graphics(nFeat.filt.path)
-```
-
-### Percent mitochondrial expression after filtering
-
-```{r pct_mito_filt_plot}
-pct.mito.filt.path <- file.path(ggplot.directory,  "percent_mt_filt.png")
-
-knitr::include_graphics(pct.mito.filt.path)
-```
-
-### Percent RBC expression after filtering
-
-```{r pct_hb_filt_plot}
-
-pct.rbc.filt.path <- file.path(ggplot.directory,  "percent_hb_filtered.png")
-
-knitr::include_graphics(pct.rbc.filt.path)
-
-```
-
-### Percent ribo gene expression after filtering
-
-```{r pct_ribo_filt_plot}
-
-pct.ribo.filt.path <- file.path(ggplot.directory,  "percent_ribo_filtered.png")
-
-knitr::include_graphics(pct.ribo.filt.path)
-
-```
-
-## Percent Y-chr genes distribution 
-
-```{r pct_y_filt}
-
-pct.y.filt.path <- file.path(ggplot.directory,  "percent_y_filtered.png")
-
-knitr::include_graphics(pct.y.filt.path)
-
-```
+\blandscape
 
 ## Filtering results
+
 
 Here is a table showing the number of cells before applying the filters described above,
 and then the number of cells remaining after filtering. 
 
-```{r filtering_res_table}
+```{r filtering_res_table, results='asis'}
 
+combo.table <-  read.csv(file.path(r.obj.loc, "filtering_stats_table.csv"))
 
+colnames(combo.table)[1] <- "Metric"
 
+combo.table %>%
+  kable(format = "latex",
+        booktabs = TRUE,
+        caption = "Cell counts before and after filtering",
+        row.names = FALSE) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position", "scale_down"),
+    font_size = 8
+  ) %>%
+  row_spec(0, angle = 45, font_size = 7) %>%
+  column_spec(1, bold = TRUE)
 
 ```
+
+
+Table showing the number of cells lost to each qc cutoff:
+
+```{r qc_attrition_table}
+load(part2.tables.path)
+
+render_plain_table(qc.attrition.table,
+                   caption = "Cells excluded by each QC criterion")
+```
+
+\elandscape
 
 # Part 2: Integration, clustering, and differential expression
 
@@ -280,7 +223,7 @@ of cell types across samples. Go [here](https://satijalab.org/seurat/articles/in
 ## Post-integration UMAP by sample
 
 ```{r post-int_umap}
-integrated.umap.path <- file.path(ggplot.directory, "umap_sample_post_integration.png")
+integrated.umap.path <- file.path(ggplot.directory, "integrated_umap_by_sample.png")
 
 knitr::include_graphics(integrated.umap.path)
 ```
@@ -288,46 +231,59 @@ knitr::include_graphics(integrated.umap.path)
 
 ### Clustering
 
-To pick a clustering resolution, we look at the silhouette score, which measures 
-how well each cell fits within its assigned cluster compared to neighboring 
-clusters. A higher score means cells are more tightly grouped and better 
-separated from other clusters, so the overall structure is cleaner. It’s not a 
-perfect measure (i.e. sometimes biological differences don’t map neatly onto what the 
-score sees) but it gives us an objective starting point when we don’t already 
-know what to expect in the data. The “best” resolution is usually flexible; a few 
-neighboring values often give very similar results, and interpretation still 
-depends on marker genes and biological context.
+To group cells into clusters, we scan a range of clustering resolutions (a resolution setting simply controls how finely the cells get divided: lower values yield fewer, broader clusters and higher values yield more, smaller ones). To choose among them, we measure cluster stability: at each resolution we repeatedly take a random 80% of the cells, re-cluster them, and check how consistently the same clusters reappear. Clusters that keep reforming under this resampling are treated as real structure, while ones that dissolve are a sign the data is being split too finely. 
 
-In other words, this clustering is an educated guess, but it can be adjusted (clusters
-can merge, or be split, or we can use a different resolution to generate more or
-fewer clusters, although the overall shape of the UMAPs won't change)
+We then automatically select the finest resolution whose clusters remain reliably reproducible, which gives us as much biological detail as the data can actually support without over-splitting. This is an objective starting point rather than a final answer: the "best" resolution is flexible, since neighboring values often give very similar results, and interpretation still depends on marker genes and biological context. In other words, this clustering is an educated guess that can be adjusted (clusters can be merged or split, or a different resolution chosen to generate more or fewer clusters, though the overall shape of the UMAPs won't change).
 
 
-## Clusters by resolution
-
-```{r num_clusters_by_res}
-clusters.by.res.path <- file.path(ggplot.directory, "number_of_clusters_vs_resolution.png")
-
-knitr::include_graphics(clusters.by.res.path)
-```
+The plot below shows this stability at each resolution (higher is more stable), with the number of clusters labeled above each point. The pipeline selected the resolution marked in red: the finest one whose stability still clears the data-derived threshold shown in blue.
 
 
-## Silhouette score by resolution
+## Cluster stability by resolution
 
-```{r silhouette_by_res}
-sil.score.res.path <- file.path(ggplot.directory, "silhouette_score_vs_resolution.png")
+```{r cluster_stability}
+clust.stability.res.path <- file.path(ggplot.directory, "stability_vs_resolution.png")
 
-knitr::include_graphics(sil.score.res.path)
+knitr::include_graphics(clust.stability.res.path)
 ```
 
 
 ## Post-integration UMAP by cluster
 
 ```{r clusters_by_res}
-cluster.umap.path <- file.path(ggplot.directory, "umap_condition_post_integration.png")
+cluster.umap.path <- file.path(ggplot.directory, "integrated_umap_by_cluster.png")
 
 knitr::include_graphics(cluster.umap.path)
 ```
+
+\pagebreak
+
+## Table of cells per cluster from each sample
+
+```{r cluster_sample_table, results='asis'}
+
+cluster.sample.df <- read.csv(file.path(r.obj.loc, "cells_perCluster_perSample.csv"),
+                              row.names=1)
+cluster.sample.df %>%
+  kable(format = "latex",
+        booktabs = TRUE,
+        caption = "Cell counts per cluster per sample",
+        longtable = FALSE,
+        row.names = FALSE) %>%
+  kable_styling(
+    latex_options = c("striped", "hold_position", "scale_down"),
+    font_size = 8
+  ) %>%
+  row_spec(0, angle = 45, font_size = 7) %>%
+  row_spec(nrow(cluster.sample.df), bold = TRUE) %>%  # bold Total row
+  column_spec(1, bold = TRUE) %>%                      # bold Cluster column
+  column_spec(ncol(cluster.sample.df), bold = TRUE)    # bold Total column
+
+# cluster.sample.df
+```
+
+
+\pagebreak
 
 ## Marker genes
 
@@ -336,7 +292,7 @@ cluster compared to all other clusters combined?
 
 ```{r gene_feature, fig.width = 25, fig.height = 20}
 figure.list <- list()
-num.clusters.list <- 0:num.clusters
+num.clusters.list <- 0:(num.clusters - 1)
 assay.used <- "SCT"
 
 # Note that knitr::include_graphics doesn't work in a loop. Instead, I'll make a list of lists of filenames
@@ -348,14 +304,14 @@ figure.list <- sapply(num.clusters.list, function(cluster.num){
                                      cluster.num, 
                                      "_", assay.used, ".png"))
   
-  vln.plot.path <- file.path(ggplot.directory, 
+  dot.plot.path <- file.path(ggplot.directory, 
                              paste0("clustering_", 
-                                    "_marker_gene_vlnPlot_cl_", 
+                                    "_marker_gene_dotPlot_cl_", 
                                     cluster.num, 
                                     "_", assay.used, ".png"))
   
   figure.list <- append(figure.list, feat.plot.path)
-  figure.list <- append(figure.list, vln.plot.path)
+  figure.list <- append(figure.list, dot.plot.path)
 
 })
 
