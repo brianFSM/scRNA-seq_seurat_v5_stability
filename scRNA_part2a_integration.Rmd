@@ -1,0 +1,608 @@
+---
+title: "scRNA-seq Part 2a: Filtering, Integration, and Resolution Recommendation"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+    latex_engine: xelatex
+params:
+  config.args: "./config.yaml"
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  warning=FALSE,error=FALSE, message=TRUE, echo=FALSE
+)
+
+source("functions_for_report.R") # This is the file that holds the R functions used in the RMD file
+```
+
+
+
+```{r libraries}
+if (!suppressMessages(require(Seurat))) stop("Seurat is required")
+if (!suppressMessages(require(yaml))) stop("yaml is required")
+if (!suppressMessages(require(cluster))) stop("cluster is required") # For silhouette score calculation
+if (!suppressMessages(require(future))) stop("future is required")
+if (!suppressMessages(require(future.apply))) stop("future.apply is required")
+if (!suppressMessages(require(cowplot))) stop("cowplot is required")
+if (!suppressMessages(require(parallelly))) stop("parallelly is required")
+if (!suppressMessages(require(ggplot2))) stop("ggplot2 is required")
+if (!suppressMessages(require(dplyr))) stop("dplyr is required")
+if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
+if (!suppressMessages(require(clustree))) stop("clustree is required")
+
+
+# the presto lib isn't required, but FindAllMarkers runs MUCH faster with it. 
+# For example, for 80k cells and 10 clusters, without presto FindAllMarkers 
+# took more than 5 hours, but with presto loaded it took less than 
+# 5 minutes!!
+#
+# The latest ragg, which is a dependency for devtools, which is itself required
+# for presto install, doesn't work with R/4.4.0 (as of 13-Nov-2025), so install 
+# an older version of ragg, then install devtools, then install presto
+# 
+# install.packages(
+#   "https://cran.r-project.org/src/contrib/Archive/ragg/ragg_1.4.0.tar.gz",
+#   repos = NULL,
+#   type = "source"
+# )
+# install.packages(devtools)
+# devtools::install_github("immunogenomics/presto")
+if (!requireNamespace("presto", quietly = TRUE)) {
+  message("Warning: presto not installed — FindAllMarkers will take a long time to run.")
+}
+
+
+```
+
+```{r prepare_inline_variables}
+# get the datetime and set it to variable
+todays.date <- Sys.Date()
+formatted.date <- format(todays.date, format="%B %d %Y")
+
+config.args <- read_yaml(params$config.args)
+
+```
+
+```{r user_vals}
+cfg <- config.args
+cfg.analysis <- cfg$analysis
+
+p1  <- cfg.analysis$part1
+p2 <- cfg.analysis$part2
+
+r.obj.loc <- cfg$data$`rds-file-path`
+organism <- cfg$project$organism
+
+################################################################################
+# QC cutoffs
+################################################################################
+
+mito.ceiling = p2$mito_ceiling
+RNA.count.floor = p2$RNA_count_floor
+RNA.count.ceiling = p2$RNA_count_ceiling
+feature.count.floor = p2$feature_count_floor
+feature.count.ceiling = p2$feature_count_ceiling
+rbc.ceiling = p2$rbc_ceiling
+ribo.floor = p2$ribo_floor
+
+node.type <- cfg.analysis$node_type
+run.doubletFinder <- as.logical(p2$run_doubletFinder)
+
+if (run.doubletFinder){ 
+  if (!suppressMessages(require(DoubletFinder))) stop("DoubletFinder is required")
+}
+
+################################################################################
+# I/O paths
+################################################################################
+part1.suffix <- p1$part1_suffix
+part2.suffix <- p2$part2_suffix
+
+unfiltered.seurat.obj.path    <- suffix_path(r.obj.loc, p1$part1_rds_save_filename,  part1.suffix)
+merged.seurat.obj.path <- suffix_path(r.obj.loc, p2$merged_seurat_obj_file, part2.suffix)
+integrated.seurat.obj.path <- suffix_path(r.obj.loc, p2$integrated_seurat_obj_file, part2.suffix)
+QC.tables.path         <- suffix_path(r.obj.loc, p1$part1_report_tables_filename, part1.suffix)
+part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, part2.suffix)
+
+ggplot.directory       <- file.path(r.obj.loc, p1$ggplot_dir)
+marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
+
+  if (!file.exists(ggplot.directory)) {
+ dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
+}
+
+if (!file.exists(marker.gene.dir)) {
+ dir.create(marker.gene.dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+
+```
+
+
+## Report and variable details
+
+This report was generated on `r formatted.date`
+
+* node.type: `r node.type`
+
+* starting with rds object at  \nolinkurl{`r unfiltered.seurat.obj.path`}
+* saving merged object to  \nolinkurl{`r merged.seurat.obj.path`}
+* saving final clustered, integrated object to  \nolinkurl{`r integrated.seurat.obj.path`}
+
+* mito ceiling: `r mito.ceiling`
+* RNA count floor: `r RNA.count.floor`
+* RNA count ceiling: `r RNA.count.ceiling`
+* Feature count floor: `r feature.count.floor`
+* Feature count ceiling: `r feature.count.ceiling`
+* RBC ceiling: `r rbc.ceiling`
+* Ribosomal floor: `r ribo.floor`
+
+* Running doubletFinder: `r run.doubletFinder`
+
+
+```{r get_num_cores_available}
+if (node.type == "compute"){
+  # If using a compute node, then put this in the submission script:
+  # export MC_CORES=${SLURM_NTASKS}
+  num.cores.available <- as.numeric(Sys.getenv("SLURM_NTASKS"))
+} else {
+  library(parallel)
+  num.cores.available <- detectCores()
+}
+
+# Parallelism is intentionally left SEQUENTIAL during PDF rendering: forked/
+# multisession futures are the usual cause of the "never-ending render" noted in
+# the README. FindAllMarkers speed comes from presto, not from a future plan.
+# To parallelize interactively, replace the line below with, e.g.:
+#   future::plan("multicore", workers = num.cores.available)
+message("Cores detected: ", num.cores.available, " (render uses sequential plan)")
+future::plan("sequential")
+```
+
+
+```{r load_data}
+seurat5.obj <- readRDS(file=unfiltered.seurat.obj.path)
+
+load(QC.tables.path)
+
+set.seed(12345)
+```
+
+
+<br/>
+
+
+## Cell filtering stats
+
+We use the cutoffs above to filter out cells.
+
+```{r apply_filtering }
+before.table <- table(seurat5.obj$sample_id)
+md.pre <- seurat5.obj[[]]   
+
+seurat5.obj <- subset(seurat5.obj, percent.mt <= mito.ceiling &
+                                 nCount_RNA >= RNA.count.floor &
+                                 nCount_RNA <= RNA.count.ceiling &
+                                 nFeature_RNA >=feature.count.floor &
+                                 nFeature_RNA <= feature.count.ceiling &
+                                 percent.hb <= rbc.ceiling &
+                                 percent.ribo >= ribo.floor)
+
+after.table <- table(seurat5.obj$sample_id)
+
+combo.table <- rbind(before.table,
+                     after.table)
+
+row.names(combo.table) <- c("Number of cells before filtering", "Number of cells after filtering")
+
+combo.table
+write.csv(combo.table, file.path(r.obj.loc, "filtering_stats_table.csv"), quote=FALSE)
+
+```
+
+```{r cells_lost_to_filtering}
+qc_attrition <- function(md, spec) {
+  fails <- vapply(names(spec), function(nm) {
+    v <- md[[nm]]; b <- spec[[nm]]
+    f <- rep(FALSE, length(v))
+    if (!is.na(b["lower"])) f <- f | v <  b["lower"]
+    if (!is.na(b["upper"])) f <- f | v >  b["upper"]
+    f
+  }, logical(nrow(md)))
+
+  n.fail <- colSums(fails)
+  data.frame(
+    criterion = names(spec),
+    bound = vapply(spec, function(b) paste(na.omit(c(
+      if (!is.na(b["lower"])) paste0(">= ", b["lower"]),
+      if (!is.na(b["upper"])) paste0("<= ", b["upper"]))), collapse = ", "), ""),
+    cells_lost      = n.fail,
+    lost_only_here  = colSums(fails & rowSums(fails) == 1),
+    pct_of_total    = round(100 * n.fail / nrow(md), 2),
+    row.names = NULL)
+}
+
+qc.spec <- list(
+  nCount_RNA   = c(lower = RNA.count.floor,     upper = RNA.count.ceiling),
+  nFeature_RNA = c(lower = feature.count.floor, upper = feature.count.ceiling),
+  percent.mt   = c(upper = mito.ceiling),
+  percent.hb   = c(upper = rbc.ceiling),
+  percent.ribo = c(lower = ribo.floor))
+
+
+
+# render_plain_table(qc_attrition(md.pre, qc.spec), caption = "Cells excluded by each QC criterion")
+
+qc.attrition.table <- qc_attrition(md.pre, qc.spec)
+render_plain_table(qc.attrition.table,
+                   caption = "Cells excluded by each QC criterion")
+
+to.save.for.report.p2 <- c("qc.attrition.table", "qc.spec", "combo.table", "md.pre")
+save(list = to.save.for.report.p2, file = part2.tables.path)
+
+# client-facing copy, alongside filtering_stats_table.csv
+write.csv(qc.attrition.table,
+          file.path(r.obj.loc, "qc_attrition_table.csv"),
+          row.names = FALSE, quote = FALSE)
+```
+
+
+```{r filtered_metric_tables}
+
+md <- seurat5.obj[[]]
+sample_col <- if ("sample_id" %in% colnames(md)) "sample_id" else {
+  # fallback: infer sample from cell names like "SAMPLE_barcode"
+  seurat5.obj$orig.ident <- sub("_.*$", "", colnames(seurat5.obj))
+  "orig.ident"
+}
+
+# --- build the same tables you had before, now from the merged & filtered object ---
+nCount.data.filtered      <- make_metric_table(seurat5.obj, sample_col, "nCount_RNA")
+nFeature.data.filtered    <- make_metric_table(seurat5.obj, sample_col, "nFeature_RNA")
+percent.mt.data.filtered  <- make_metric_table(seurat5.obj, sample_col, "percent.mt")
+percent.hb.data.filtered  <- make_metric_table(seurat5.obj, sample_col, "percent.hb")
+percent.y.data.filtered   <- make_metric_table(seurat5.obj, sample_col, "percent.y")
+percent.ribo.data.filtered <- make_metric_table(seurat5.obj, sample_col, "percent.ribo")
+
+# For custom sorting order in violin plots:
+# sample_order <- c("sample_1", "sample_2",
+#                   "smaple_3", "sample_4")
+# nCount.data.filtered <- make_metric_table(seurat5.obj, sample_col, "nCount_RNA", sample_levels = sample_order)
+
+
+```
+
+# QC filtering, before and after
+
+Rows are metrics; the left panel is raw with the filtered range shaded red, the
+right panel is what survives. Both panels in a row share a y-axis, so the
+comparison is direct. A cutoff that removes no cells is drawn without shading.
+
+## Library size and complexity
+
+```{r qc_ba_counts}
+qc.counts <- rbind(
+  qc_long(list(nCount_RNA = nCount_data,
+               nFeature_RNA = nFeature_data),          stage = "raw"),
+  qc_long(list(nCount_RNA = nCount.data.filtered,
+               nFeature_RNA = nFeature.data.filtered), stage = "filtered"))
+
+thr.counts <- qc_thresholds(
+  list(nCount_RNA   = c(lower = RNA.count.floor,     upper = RNA.count.ceiling),
+       nFeature_RNA = c(lower = feature.count.floor, upper = feature.count.ceiling)),
+  metric.levels = levels(qc.counts$metric))
+
+p.qc.counts <- qc_facet_plot(qc.counts, thresholds = thr.counts, log.y = TRUE)
+p.qc.counts
+save_png_plot(p.qc.counts, "qc_counts_before_after.png", ggplot.directory,
+              width = 6.5, height = 5)
+```
+
+## Contamination metrics
+
+```{r qc_ba_percents}
+qc.pct <- rbind(
+  qc_long(list(percent.mt = percent_mt_data,
+               percent.hb = percent_hb_data,
+               percent.ribo = percent_ribo_data),           stage = "raw"),
+  qc_long(list(percent.mt = percent.mt.data.filtered,
+               percent.hb = percent.hb.data.filtered,
+               percent.ribo = percent.ribo.data.filtered),  stage = "filtered"))
+
+thr.pct <- qc_thresholds(
+  list(percent.mt   = c(upper = mito.ceiling),
+       percent.hb   = c(upper = rbc.ceiling),
+       percent.ribo = c(lower = ribo.floor)),
+  metric.levels = levels(qc.pct$metric))
+
+p.qc.pct <- qc_facet_plot(qc.pct, thresholds = thr.pct)
+p.qc.pct
+save_png_plot(p.qc.pct, "qc_percent_before_after.png", ggplot.directory,
+              width = 6.5, height = 6.5)
+```
+
+# Analysis without integration
+
+
+```{r indiv_samples_sctransform_doublet_removal, eval=run.doubletFinder}
+t0 <- Sys.time()
+
+sample.list <- SplitObject(seurat5.obj, split.by = "sample_id")
+
+sample.list <- lapply(sample.list, function(obj) {
+  # SCTransform + dim reduction
+  obj <- SCTransform(obj, verbose = FALSE)
+  obj <- RunPCA(obj, verbose = FALSE)
+  obj <- RunUMAP(obj, dims = 1:30, verbose = FALSE)
+  obj <- FindNeighbors(obj, dims = 1:30, verbose = FALSE)
+  obj <- FindClusters(obj, verbose = FALSE)
+
+  # pK identification
+  sweep.res   <- paramSweep(obj, PCs = 1:10, sct = TRUE)
+  sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+  bcmvn       <- find.pK(sweep.stats)
+  pk.val      <- as.numeric(as.character(bcmvn$pK[which.max(bcmvn$BCmetric)]))
+
+  # Homotypic adjustment using fresh clusters
+  annotations    <- obj@meta.data$seurat_clusters
+  homotypic.prop <- modelHomotypic(annotations)
+  nExp_poi       <- round(0.075 * nrow(obj@meta.data))
+  nExp_poi.adj   <- round(nExp_poi * (1 - homotypic.prop))
+
+  sample.name <- unique(obj$sample_id)
+
+  cat(sample.name, " nCells:", ncol(obj), "| pK:", pk.val,
+      "| nExp:", nExp_poi, "| nExp.adj:", nExp_poi.adj, "\n")
+
+  # DoubletFinder - run 1 (unadjusted)
+  obj      <- doubletFinder(obj, PCs = 1:10, pN = 0.25, pK = pk.val,
+                             nExp = nExp_poi, reuse.pANN = NULL, sct = TRUE)
+  pann.col <- grep("pANN", names(obj[[]]), value = TRUE)
+
+  # DoubletFinder - run 2 (homotypic adjusted)
+  obj      <- doubletFinder(obj, PCs = 1:10, pN = 0.25, pK = pk.val,
+                             nExp = nExp_poi.adj, reuse.pANN = pann.col, sct = TRUE)
+  df.col   <- tail(grep("DF.classifications", names(obj[[]]), value = TRUE), 1)
+
+  cat("Doublets removed:", table(obj[[df.col]])[["Doublet"]],
+      "| Singlets retained:", table(obj[[df.col]])[["Singlet"]], "\n")
+
+  # Remove doublets
+  singlet.cells <- rownames(obj@meta.data)[obj@meta.data[[df.col]] == "Singlet"]
+  subset(obj, cells = singlet.cells)
+})
+
+# Re-merge cleaned samples
+seurat5.obj <- merge(sample.list[[1]], y = sample.list[-1])
+
+time.len <- difftime(Sys.time(), t0, units = "mins")
+print(paste0("SCTransform + DoubletFinder took ", round(time.len, 2), " minutes to run."))
+saveRDS(seurat5.obj, merged.seurat.obj.path)
+print(paste0("Saved merged object to ", merged.seurat.obj.path))
+
+
+```
+
+```{r doubletFinderMsg, eval=run.doubletFinder, results='asis'}
+cat("## Doublet Detection\n\nDoubletFinder was run on each sample individually prior to merging.\n")
+```
+
+SCTransform, PCA and UMAP generation
+
+```{r process_merged_object}
+
+# seurat5.obj <- readRDS(merged.seurat.obj.path)
+
+t0 <- Sys.time()
+
+seurat5.obj <- SCTransform(seurat5.obj)
+
+time.len <- difftime(Sys.time(), t0, units = "mins")
+print(paste0("SCTransform took ", round(time.len, 2), " minutes to run."))
+
+seurat5.obj <- RunPCA(seurat5.obj)
+seurat5.obj <- RunUMAP(seurat5.obj, dims = 1:30)
+
+saveRDS(seurat5.obj, merged.seurat.obj.path)
+print(paste0("Saved merged object to ", merged.seurat.obj.path))
+```
+
+## Umap of merged, non-integrated object
+
+```{r merged_obj_umap}
+
+# seurat5.obj <- readRDS(merged.seurat.obj.path)
+
+merged.dimplot <- DimPlot(seurat5.obj, 
+                          reduction = "umap", 
+                          group.by = "sample_id",
+                          shuffle = TRUE,
+                          raster=FALSE)
+
+save_png_plot(merged.dimplot, "umap_merged_seruat_obj.png", ggplot.directory)
+merged.dimplot
+```
+
+
+
+# Integration
+
+```{r integrate_seurat_obj}
+integrated.reduction.label <- "integrated.rpca"
+
+options(future.globals.maxSize = +Inf)
+# seurat5.obj <- readRDS(merged.seurat.obj.path)
+
+# --- START cell num check ---
+# Calculate the minimum number of cells in any layer/sample
+min.cells <- min(table(seurat5.obj$sample_id))
+
+# Set k.weight to the minimum of 100 (default) or 70% of the smallest sample size
+# assuming a worst-case where only 70% of the cells end up acting as anchors
+if(min.cells < 150) {
+  k.weight.val <- floor(min.cells * 0.7)
+  message(paste("Warning: Smallest sample has", min.cells, "cells."))
+  message(paste("Setting k.weight conservatively to", k.weight.val, "to avoid anchor error."))
+} else {
+  k.weight.val <- 100
+}
+
+message(paste("Smallest sample size is", min.cells, " - setting k.weight to ", k.weight.val))
+
+
+t0 <- Sys.time()
+seurat5.obj.integrated <- IntegrateLayers(
+  object = seurat5.obj,
+  method = RPCAIntegration,
+  normalization.method = "SCT",
+  orig.reduction = "pca",
+  new.reduction = integrated.reduction.label,
+  k.weight = k.weight.val, # <--- Pass the dynamic value here
+  verbose = FALSE
+)
+
+time.len <- difftime(Sys.time(), t0, units = "mins")
+
+print(paste0("IntegrateLayers took ", round(time.len, 2), " minutes to run."))
+# re-join layers after integration
+seurat5.obj.integrated[["RNA"]] <- JoinLayers(seurat5.obj.integrated[["RNA"]])
+
+# Build the SNN graph on the integrated embedding under a STABLE name
+# ("int_snn"), so part 2b can cluster straight off the saved object without
+# recomputing neighbours.
+seurat5.obj.integrated <- FindNeighbors(seurat5.obj.integrated,
+                                        reduction = integrated.reduction.label,
+                                        dims = 1:30, graph.name = "int_snn")
+
+# # --- post-integration UMAP (note the reduction name) ---
+seurat5.obj.integrated <- RunUMAP(
+  seurat5.obj.integrated, dims = 1:30, reduction = integrated.reduction.label,
+  reduction.name = "umap.postint"
+)
+
+
+# Stamp the upstream parameters into the object so part 2b can detect a stale
+# handoff (i.e. an integrated object built under different QC / integration /
+# doublet settings than the current config).
+seurat5.obj.integrated@misc$upstream_params <- upstream_params(
+  p2               = p2,
+  run.doubletFinder = run.doubletFinder,
+  organism         = organism,
+  part1.suffix     = part1.suffix,
+  part2.suffix     = part2.suffix
+)
+
+saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
+print(paste0("Saved integrated object (with int_snn graph) to ", integrated.seurat.obj.path))
+```
+
+# Clustering resolution recommendation
+
+Part 2a does **not** commit to a final clustering. It scores a grid of
+resolutions for *subsample stability* — how reproducibly each resolution
+recovers the same clusters when a fraction of cells is resampled — and writes a
+**proposed** resolution to the config. Part 2b reads that value (or your manual
+override) and does the actual clustering + marker discovery.
+
+Stability is chosen over silhouette because silhouette systematically rewards
+coarse partitions; stability instead answers the question we actually care about
+— the finest resolution the data still supports reproducibly.
+
+```{r stability_sweep}
+# Resolution grid (config-driven; shared with the old silhouette sweep).
+res.min  <- if (!is.null(p2$cluster_res_min))  as.numeric(p2$cluster_res_min)  else 0.1
+res.max  <- if (!is.null(p2$cluster_res_max))  as.numeric(p2$cluster_res_max)  else 1.0
+res.step <- if (!is.null(p2$cluster_res_step)) as.numeric(p2$cluster_res_step) else 0.1
+resolutions <- round(seq(res.min, res.max, res.step), 3)
+
+# Stability knobs (config-driven, with sensible defaults).
+n.sub  <- if (!is.null(p2$stability_reps))           as.integer(p2$stability_reps)           else 5L
+frac   <- if (!is.null(p2$stability_subsample_frac)) as.numeric(p2$stability_subsample_frac) else 0.8
+thresh <- if (!is.null(p2$stability_threshold))      as.numeric(p2$stability_threshold)      else 0.75
+
+t0 <- Sys.time()
+stability    <- select_resolution_by_stability( 
+  obj = seurat5.obj.integrated,
+  resolutions = resolutions, 
+  graph.name = "int_snn",
+  reduction = integrated.reduction.label, 
+  dims = 1:30, 
+  n_subsample = n.sub,
+  subsample_frac = frac, 
+  seed = 1)   # no stability_threshold
+
+stability.df <- stability$summary
+proposed.res <- stability$chosen_resolution
+
+cat("Data-derived threshold:", round(stability$threshold, 3),
+    "| proposed resolution:", proposed.res, "\n")
+
+message("Stability sweep took ", round(difftime(Sys.time(), t0, units = "mins"), 2), " min")
+
+stability.df <- stability$summary
+proposed.res <- stability$chosen_resolution
+
+print(stability.df)
+cat("\nProposed resolution (finest that stays >= ", thresh, " stability): ",
+    proposed.res, "\n", sep = "")
+```
+
+```{r stability_plot}
+# chooseR-style robustness plot: per-resolution MEDIAN of the per-cluster
+# stability distribution with a bootstrap 95% CI (crossbars). The threshold is
+# DATA-DERIVED (highest lower-CI bound across non-trivial resolutions, blue
+# line); the chosen resolution is the finest one whose median clears it (red).
+thr        <- stability$threshold
+lvls       <- levels(factor(stability.df$resolution))
+chosen.pos <- match(as.character(proposed.res), lvls)
+
+p.stab <- ggplot(stability.df, aes(x = factor(resolution), y = median)) +
+  geom_crossbar(aes(ymin = low, ymax = high), fill = "grey85", linewidth = 0.25) +
+  geom_hline(yintercept = thr, colour = "steelblue") +
+  geom_vline(xintercept = chosen.pos, colour = "firebrick") +
+  geom_text(aes(label = n_clusters), vjust = -0.8, size = 3) +
+  labs(
+    title    = "Cluster robustness vs. resolution (data-derived threshold)",
+    subtitle = paste0("numbers = cluster count | blue = threshold (",
+                      round(thr, 3), ") | red = chosen (", proposed.res, ")"),
+    x = "resolution",
+    y = "median per-cluster stability (best-match Jaccard), 95% CI"
+  ) +
+  theme_minimal()
+
+save_png_plot(p.stab, "stability_vs_resolution.png", ggplot.directory, width = 8, height = 6)
+p.stab
+```
+
+```{r clustree_plot, eval = requireNamespace("clustree", quietly = TRUE)}
+# Optional override aid: how clusters split/merge across the grid. Skipped
+# automatically if the clustree package isn't installed. NOTE: this recomputes
+# FindClusters across the grid to populate the int_snn_res.* columns; it could
+# be merged with the stability sweep later to avoid the double pass.
+for (res in resolutions) {
+  seurat5.obj.integrated <- FindClusters(seurat5.obj.integrated,
+                                         graph.name = "int_snn",
+                                         resolution = res, verbose = FALSE)
+}
+clustree.plot <- clustree::clustree(seurat5.obj.integrated, prefix = "int_snn_res.")
+save_png_plot(clustree.plot, "clustree.png", ggplot.directory, width = 9, height = 11)
+clustree.plot
+```
+
+```{r write_proposed_resolution}
+# Write the PROPOSED resolution back to config as the value users can override.
+# Part 2b derives the label and writes the authoritative num_clusters after it
+# actually clusters; only the numeric value is written here.
+cfg$analysis$part2$clustering_resolution_value <- proposed.res
+yaml::write_yaml(cfg, params$config.args)
+cat("Wrote proposed clustering_resolution_value =", proposed.res, "to", params$config.args, "\n")
+cat("To override: edit clustering_resolution_value in config.yaml, then run part 2b.\n")
+```
+
+## Session Information
+```{r session_info_2a}
+sessionInfo()
+```
