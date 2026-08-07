@@ -573,7 +573,7 @@ p.stab <- ggplot(stability.df, aes(x = factor(resolution), y = median)) +
   ) +
   theme_minimal()
 
-save_png_plot(p.stab, "stability_vs_resolution.png", ggplot.directory, width = 8, height = 6)
+save_png_plot(p.stab, paste0("stability_vs_resolution", part2.suffix, ".png"), ggplot.directory, width = 8, height = 6)
 p.stab
 ```
 
@@ -588,7 +588,7 @@ for (res in resolutions) {
                                          resolution = res, verbose = FALSE)
 }
 clustree.plot <- clustree::clustree(seurat5.obj.integrated, prefix = "int_snn_res.")
-save_png_plot(clustree.plot, "clustree.png", ggplot.directory, width = 9, height = 11)
+save_png_plot(clustree.plot, paste0("clustree", part2.suffix, ".png"), ggplot.directory, width = 9, height = 11)
 clustree.plot
 ```
 

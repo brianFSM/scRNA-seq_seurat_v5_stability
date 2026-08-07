@@ -41,13 +41,24 @@ analysis:
     cluster_res_min: 0.1
     cluster_res_max: 1.0
     cluster_res_step: 0.1
+    # Part 2a scores each resolution in the grid above for subsample stability
+    # (how reproducibly it recovers the same clusters under resampling) and
+    # proposes the finest resolution that stays at/above stability_threshold.
+    # More reps = steadier estimate but more compute (reps x grid FindClusters).
+    stability_reps: 5
+    stability_subsample_frac: 0.8
+    stability_threshold: 0.75
+    # to change your clustering, only ever touch clustering_resolution_value. Editing 
+    # clustering_resolution (lower down in the config) by hand does nothing useful because
+    # 2b recomputes it from the value and overwrites whatever you typed
+    clustering_resolution_value: None
     part2_rds_open_filename: _0_raw_seurat_object.RDS
-    merged_seurat_obj_file: _2_seurat5_obj_merged.RDS
-    integrated_seurat_obj_file: _3_seurat5_obj_integrated.RDS
-    clustered_seurat_obj_file: _4_seurat5_obj_clustered.RDS
+    merged_seurat_obj_file: _1_seurat5_obj_merged.RDS
+    integrated_seurat_obj_file: _2_seurat5_obj_integrated.RDS
+    clustered_seurat_obj_file: _3_seurat5_obj_clustered.RDS
     part2_report_tables_filename: part2_tables_for_report.RData
     marker_gene_dir: marker_genes
-    run_doubletFinder: 'FALSE'
+    run_doubletFinder: 'TRUE'
     part2_suffix: ''
     clustering_resolution: None
     num_clusters: 0

@@ -14,17 +14,14 @@ params:
 
 
 
-```{r setup}
-# install.packages("tinytex")
-# tinytex::install_tinytex()   # downloads + sets up ~/.TinyTeX
-# tinytex::is_tinytex()        # should return TRUE
-
+```{r setup, echo=FALSE}
 knitr::opts_chunk$set(
   echo = FALSE, warning=FALSE,error=FALSE, message=FALSE
 )
 
 # source helpers that sit beside this Rmd
 source("functions_for_report.R")
+
 ```
 
 
@@ -37,6 +34,7 @@ if (!suppressMessages(require(knitr))) stop("knitr is required")
 if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
 if (!suppressMessages(require(dplyr))) stop("dplyr is required")
 if (!suppressMessages(require(scales))) stop("scales is required")
+if (!suppressMessages(require(SoupX))) stop("SoupX is required")
 
 ```
 
@@ -50,27 +48,18 @@ formatted.date <- format(todays.date, format="%B %d %Y")
 # Import the config file
 config.args <- read_yaml(params$config.args)
 
-run_metrics_tables=TRUE
-is_tenx=TRUE
-
-metrics.table.string <- config.args$analysis$part1$generate_metrics_tables
-
-if (metrics.table.string == "FALSE"){
-  run_metrics_tables=FALSE
-}
-
+run_metrics_tables <- as.logical(config.args$analysis$part1$generate_metrics_tables)
 
 ################################################################################
 # set project variables
 ################################################################################
 analyst.name <- config.args$project$`analyst-name`
 formatted.samples <- config.args$project$samples # Sanitized below
-experiment.name = config.args$project$`project-name` 
-project.description <- config.args$project$`project-decription`
+experiment.name = config.args$project$`project-name`
+project.description <- config.args$project$`project-description`
 dataset.path <- config.args$data$parent_directory_path
-import.h5 <- config.args$data$`import-h5` # set to false if you want to import the matrix files
 organism = config.args$project$organism
-
+run.soupx <- as.logical(config.args$analysis$part1$run_SoupX)
 
 ################################################################################
 # Set output directory paths
@@ -119,7 +108,7 @@ if (organism == "human"){
 } else if (organism == "mouse") {
   mt.marker = "^mt-"
   hb.marker = "^Hb[^(p)]"
-  ribo.marker = "^Rp[sl]" 
+  ribo.marker = "^Rp[sl]"
   y.genes <- readLines("y_genes_mm10_symbols.txt")
   genes.file = "/projects/b1012/xvault/REFERENCES/10xGenomics/RNA-seq/mm10/refdata-gex-mm10-2020-A/genes/genes.gtf"
   xist.gene = "Xist"
@@ -136,19 +125,8 @@ if (organism == "human"){
 ################################################################################
 
 ids <- sanitize_sample_names(formatted.samples)
-seurat.sample.names <- gsub("-", "_", formatted.samples)
+# seurat.sample.names <- gsub("-", "_", formatted.samples)
 ```
-
-```{r set_report_paths}
-# For the included functions
-# set_report_paths(
-		 # ggplot.dir <- ggplot.directory,
-		 # dataset.path <- dataset.path)
-
-```
-
-
-
 
 
 ## Report and variable details
@@ -160,7 +138,7 @@ This report was generated on `r formatted.date`
 * starting with raw data at \nolinkurl{`r dataset.path`}
 * saving rds object to \nolinkurl{`r unfiltered.seurat.obj.path`}
 * saving file for report at \nolinkurl{`r QC.tables.path`}
-* Importing h5?: `r import.h5`
+* SoupX ambient RNA correction: `r run.soupx`
 
 ## Project Description:
 
@@ -187,8 +165,6 @@ qc.table <- make_qc_table(ids, dataset.path)
 render_formatted_table(qc.table)
 ```
 
-
-
 ## Load the Cell Ranger Matrix Data and create the base Seurat object.
 
 <!-- Import the 10x data (either matrices or h5) and create a merged seurat object with counts of each sample as layers. -->
@@ -198,16 +174,23 @@ Objects created for:
 
 
 ```{r make_seurat_objs}
+# To avoid any future.globals.maxSize errors:
+options(future.globals.maxSize = Inf)
+future::plan("sequential")
 
 # make a Seurat object per sample
 seurat.list <- lapply(ids, function(s) {
-  # m <- read_10x_any(s)
-  m <- read_10x_any(s, dataset.path)
+  m <- read_10x_any(s, dataset.path, run.soupx)
   s_fixed <- gsub("-", "_", s)
-  colnames(m) <- paste0(sub("-.*$", "", colnames(m)), "-", s_fixed)  # keep 10x barcode-left, add sample suffix
-  o <- CreateSeuratObject(counts = m, project = experiment.name, min.features = 300)
+  # read_10x_any() prefers the RAW 10x matrix, which includes empty droplets.
+  # min.features here only strips those empties so the QC plots are renderable;
+  # it is deliberately well below the analytical feature floor
+  # (feature_count_floor, applied in part 2) so the part-1 "raw" distributions
+  # stay honest rather than being pre-cut at the downstream threshold.
+  # Cell-name uniqueness is handled by add.cell.ids at the merge step below,
+  # so no manual barcode renaming is needed here.
+  o <- CreateSeuratObject(counts = m, project = experiment.name, min.features = 100)
   o$sample_id <- s_fixed
-  print(paste0(unique(s_fixed)))
   o
 })
 names(seurat.list) <- gsub("-", "_", ids)
@@ -215,13 +198,21 @@ names(seurat.list) <- gsub("-", "_", ids)
 
 ```{r set_percent_feats}
 
-for (i in 1:length(seurat.list)) {
+for (i in seq_along(seurat.list)) {
   seurat.list[[i]][["percent.mt"]] <- PercentageFeatureSet(seurat.list[[i]], pattern = mt.marker)
   # Calculate percentage of counts from hemoglobin genes (RBC markers)
   seurat.list[[i]][["percent.hb"]] <- PercentageFeatureSet(seurat.list[[i]], pattern = hb.marker)
-  seurat.list[[i]][["percent.y"]] <- PercentageFeatureSet(seurat.list[[i]], features = y.genes)
+
+  # Filter out the y.genes that aren't in the object
+  y.genes.present <- intersect(y.genes, rownames(seurat.list[[i]]))
+  if (length(y.genes.present) < length(y.genes)) {
+    message(length(y.genes) - length(y.genes.present), " Y-chr genes not found in sample ",
+            names(seurat.list)[i], " and will be excluded from percent.y calculation")
+  }
+
+  seurat.list[[i]][["percent.y"]] <- PercentageFeatureSet(seurat.list[[i]], features = y.genes.present)
   seurat.list[[i]][["percent.ribo"]] <- PercentageFeatureSet(seurat.list[[i]], pattern = ribo.marker)
-  
+
 }
 
 ```
@@ -238,16 +229,16 @@ percent_ribo_data <- make_metric_table_from_list(seurat.list, "percent.ribo")
 # Or with a custom sample order
 # sample_order <- c("sample_1", "sample_2",
 #                   "sample_3", "sample_4")
-# 
+#
 # nCount_data <- make_metric_table_from_list(seurat.list, "nCount_RNA", sample_levels = sample_order)
 
 
 
 to.save.for.report <- c("nCount_data",
-                        "nFeature_data", 
+                        "nFeature_data",
                         "percent_mt_data",
                         "percent_hb_data",
-                        "percent_y_data", 
+                        "percent_y_data",
                         "percent_ribo_data")
 
 save(list = to.save.for.report, file=QC.tables.path)
@@ -255,95 +246,36 @@ save(list = to.save.for.report, file=QC.tables.path)
 
 # Part 2: QC plots
 
-## nCount RNA distribution
+Raw distributions across all samples. Violins are width-normalized so a few
+extreme cells don't flatten the rest; count metrics are on a log scale. Use
+these to pick the cutoffs written into `part2:` in the config.
 
-```{r p_nCount_plot}
-p_nCount <- vln_boxplot(data = nCount_data,  
-                          x = Sample, 
-                          y = nCount_RNA,
-                          title = "nCount_RNA Distribution per Sample")
-# p_nCount <- ggplot(nCount_data, aes(x = Sample, y = nCount_RNA)) +
-#   geom_violin() +
-#   geom_boxplot(width = 0.1) +
-#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-#   ggtitle("nCount_RNA Distribution per Sample")
+## Library size and complexity
 
-p_nCount
+```{r qc_survey_counts}
+qc.counts.raw <- qc_long(list(nCount_RNA   = nCount_data,
+                              nFeature_RNA = nFeature_data))
 
-save_png_plot(p_nCount, "nCount_RNA_distribution.png", ggplot.directory)
+p.qc.counts <- qc_facet_plot(qc.counts.raw, log.y = TRUE)
+p.qc.counts
+save_png_plot(p.qc.counts, "qc_counts_raw_facet.png", ggplot.directory,
+              width = 7, height = 3.6)
 ```
 
+## Contamination and composition metrics
 
-## nFeature distribution
+```{r qc_survey_percents}
+qc.pct.raw <- qc_long(list(percent.mt   = percent_mt_data,
+                           percent.hb   = percent_hb_data,
+                           percent.ribo = percent_ribo_data,
+                           percent.y    = percent_y_data))
 
-```{r p_nFeature_plot}
-
-p_nFeature <- vln_boxplot(data = nFeature_data,  
-                          x = Sample, 
-                          y = nFeature_RNA,
-                          title = "nFeature_RNA Distribution per Sample")
-  
-
-
-p_nFeature
-save_png_plot(p_nFeature, "nFeature_RNA_distribution.png", ggplot.directory)
+p.qc.pct <- qc_facet_plot(qc.pct.raw, facet.nrow = 2)
+p.qc.pct
+save_png_plot(p.qc.pct, "qc_percent_raw_facet.png", ggplot.directory,
+              width = 7, height = 5.5)
 ```
 
-## Percent mito distribution
-
-```{r pct_mito_plot}
-
-p_percent_mt <- vln_boxplot(data = percent_mt_data,  
-                          x = Sample, 
-                          y = percent.mt,
-                          title = "Percent mitochondrial content per Sample")
-
-
-p_percent_mt
-save_png_plot(p_percent_mt, "percent_mt_distribution.png", ggplot.directory)
-```
-
-## Percent RBC distribution
-
-```{r pct_hb_plot}
-
-p_percent_hb <- vln_boxplot(data = percent_hb_data,  
-                          x = Sample, 
-                          y = percent.hb,
-                          title = "Percent hemoglobin content (RBCs) per Sample")
-
-p_percent_hb
-save_png_plot(p_percent_hb, "percent_hb_distribution.png", ggplot.directory)
-
-```
-
-## Percent ribo genes distribution
-
-```{r pct_ribo_plot}
-
-p_percent_ribo <- vln_boxplot(data = percent_ribo_data,  
-                          x = Sample, 
-                          y = percent.ribo,
-                          title = "Percent ribo gene expression per Sample")
-
-p_percent_ribo
-save_png_plot(p_percent_ribo, "percent_ribo_distribution.png", ggplot.directory)
-
-```
-
-
-## Percent Y-chr genes distribution
-
-```{r pct_y_plot}
-
-p_percent_y <- vln_boxplot(data = percent_y_data,  
-                          x = Sample, 
-                          y = percent.y,
-                          title = "Percent Y chr gene expression per Sample")
-
-p_percent_y
-save_png_plot(p_percent_y, "percent_y_distribution.png", ggplot.directory)
-```
 
 ```{r merge_list_into_agg_obj}
 # merge => v5 stores each sample as its own layer(s) inside RNA
@@ -353,7 +285,7 @@ seurat.obj.v5 <- merge(
   x            = seurat.list[[1]],
   y            = seurat.list[-1],
   add.cell.ids = ids,
-  project      = "MBE"
+  project      = experiment.name
 )
 
 seurat.obj.v5 <- JoinLayers(seurat.obj.v5)
@@ -382,7 +314,6 @@ saveRDS(seurat.obj.v5, unfiltered.seurat.obj.path)
 
 
 ## Session Information
-```{r sessioinfo, eval=TRUE}
+```{r sessioninfo, eval=TRUE}
 sessionInfo()
 ```
-
