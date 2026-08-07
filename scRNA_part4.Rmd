@@ -35,7 +35,7 @@ if (!suppressMessages(require(dplyr))) stop("dplyr is required")
 if (!suppressMessages(require(ggplot2))) stop("ggplot2 is required")
 
 # Only loading this so that it shows up in the sessionInfo part of the report
-if (!suppressMessages(require(seurat))) stop("seurat is required") 
+if (!suppressMessages(require(Seurat))) stop("seurat is required") 
 ```
 
 
@@ -131,4 +131,5 @@ sex.markers <-
 ```{r sessioinfo}
 sessionInfo()
 ```
+
 
