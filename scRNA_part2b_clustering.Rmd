@@ -351,23 +351,22 @@ saveRDS(cluster.markers.RNA, file=file.path(marker.gene.dir, "cluster_markers_RN
 ## Plot markers
 
 ```{r gene_feature_plots}
-# seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
-# clustering.resolution <- p2$clustering_resolution
-# cluster.markers.sct <- read.csv(file.path(marker.gene.dir, paste0("cluster_markers_", clustering.resolution, ".csv")))
-
 markers <- cluster.markers.sct # or cluster.markers.RNA
+num.clusters.list <- sort(unique(markers$cluster))   # sorted, not hash order
 
-num.clusters.list <- unique(markers$cluster)
+# Which marker plots to draw. Config-driven; default feat + dot.
+marker.plot.types <- p2$marker_plot_types %||% c("feat", "dot")
 
-invisible(lapply(num.clusters.list, 
-                 feat_plots_top_genes, 
-                 seurat.obj = seurat5.obj.integrated,
+invisible(lapply(num.clusters.list,
+                 feat_plots_top_genes,
+                 seurat.obj      = seurat5.obj.integrated,
                  marker.genes.df = markers,
-                 ggplot.dir = ggplot.directory, 
+                 ggplot.dir      = ggplot.directory,
                  filename.suffix = part2.suffix,
-                 assay.used = "SCT",
-                 num_cols = 3,
-                 to_raster=FALSE))
+                 plots           = marker.plot.types,
+                 assay.used      = "SCT",
+                 num_cols        = 3,
+                 to_raster       = FALSE))
 
 ```
 

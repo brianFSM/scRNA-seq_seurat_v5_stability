@@ -300,12 +300,14 @@ figure.list <- sapply(num.clusters.list, function(cluster.num){
 
   feat.plot.path <- file.path(ggplot.directory, 
                               paste0("clustering_", 
+                                     part2.suffix,
                                      "_marker_gene_featPlot_cl_", 
                                      cluster.num, 
                                      "_", assay.used, ".png"))
   
   dot.plot.path <- file.path(ggplot.directory, 
                              paste0("clustering_", 
+                                    part2.suffix, 
                                     "_marker_gene_dotPlot_cl_", 
                                     cluster.num, 
                                     "_", assay.used, ".png"))
