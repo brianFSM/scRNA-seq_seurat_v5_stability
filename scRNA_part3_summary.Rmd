@@ -74,6 +74,9 @@ import.h5 <- config.args$data$`import-h5` # set to false if you want to import t
 organism = config.args$project$organism
 num.clusters <- config.args$analysis$part2$num_clusters
 
+clustering.resolution <- p2$clustering_resolution
+if (is.null(clustering.resolution) || identical(as.character(clustering.resolution), "None"))
+  stop("clustering_resolution is not set in the config — run part 2b before part 3.")
 
 ################################################################################
 # Set output directory paths
@@ -98,18 +101,7 @@ part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, par
 ggplot.directory.name <- p1$ggplot_dir
 ggplot.directory <- file.path(r.obj.loc, ggplot.directory.name)
 
-# create ggplot folder if it doesn't exist already
-if (!file.exists(ggplot.directory)) {
- dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
-}
-
-# create rds folder if it doesn't exist already
-if (!file.exists(r.obj.loc)) {
-
- dir.create(r.obj.loc, showWarnings = FALSE, recursive = TRUE)
-
-}
-
+marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
 
 ids <- sanitize_sample_names(formatted.samples)
 ```
@@ -291,33 +283,40 @@ For each cluster, which genes are differentially expressed in that
 cluster compared to all other clusters combined?
 
 ```{r gene_feature, fig.width = 25, fig.height = 20}
-figure.list <- list()
-num.clusters.list <- 0:(num.clusters - 1)
 assay.used <- "SCT"
 
-# Note that knitr::include_graphics doesn't work in a loop. Instead, I'll make a list of lists of filenames
-figure.list <- sapply(num.clusters.list, function(cluster.num){
+# Cluster IDs come from the marker table 2b wrote, not 0:(num_clusters - 1):
+# a cluster with no positive markers gets no figures (only.pos = TRUE), and IDs
+# aren't guaranteed contiguous if clusters were filtered by hand.
+marker.csv <- file.path(marker.gene.dir,
+                        paste0("cluster_markers_", clustering.resolution, ".csv"))
+if (!file.exists(marker.csv))
+  stop("Marker table not found: ", marker.csv, " — run part 2b first.")
+clusters.present <- sort(unique(read.csv(marker.csv)$cluster))
 
-  feat.plot.path <- file.path(ggplot.directory, 
-                              paste0("clustering_", 
-                                     part2.suffix,
-                                     "_marker_gene_featPlot_cl_", 
-                                     cluster.num, 
-                                     "_", assay.used, ".png"))
-  
-  dot.plot.path <- file.path(ggplot.directory, 
-                             paste0("clustering_", 
-                                    part2.suffix, 
-                                    "_marker_gene_dotPlot_cl_", 
-                                    cluster.num, 
-                                    "_", assay.used, ".png"))
-  
-  figure.list <- append(figure.list, feat.plot.path)
-  figure.list <- append(figure.list, dot.plot.path)
+# Mirror the plot types 2b was configured to draw, so part 3 never asks for a
+# panel that was never generated.
+marker.plot.types <- p2$marker_plot_types %||% c("feat", "dot")
 
-})
+# One path per (cluster, kind), interleaved so each cluster's panels stay together.
+figure.list <- unlist(lapply(clusters.present, function(cluster.num) {
+  vapply(marker.plot.types,
+         function(kind) marker_plot_path(ggplot.directory, cluster.num, kind,
+                                         assay.used, part2.suffix),
+         character(1))
+}), use.names = FALSE)
 
-knitr::include_graphics(unlist(figure.list))
+absent <- figure.list[!file.exists(figure.list)]
+if (length(absent))
+  warning("Marker plots missing, omitted from the report: ",
+          paste(basename(absent), collapse = ", "))
+figure.list <- figure.list[file.exists(figure.list)]
+
+if (length(figure.list) == 0) {
+  cat("No marker gene plots were found in", ggplot.directory, "\n")
+} else {
+  knitr::include_graphics(figure.list)
+}
 ```
 
 
