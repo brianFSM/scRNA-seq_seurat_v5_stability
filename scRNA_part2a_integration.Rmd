@@ -31,7 +31,6 @@ if (!suppressMessages(require(parallelly))) stop("parallelly is required")
 if (!suppressMessages(require(ggplot2))) stop("ggplot2 is required")
 if (!suppressMessages(require(dplyr))) stop("dplyr is required")
 if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
-if (!suppressMessages(require(clustree))) stop("clustree is required")
 
 
 # the presto lib isn't required, but FindAllMarkers runs MUCH faster with it. 
@@ -474,8 +473,9 @@ seurat5.obj.integrated[["RNA"]] <- JoinLayers(seurat5.obj.integrated[["RNA"]])
 # ("int_snn"), so part 2b can cluster straight off the saved object without
 # recomputing neighbours.
 seurat5.obj.integrated <- FindNeighbors(seurat5.obj.integrated,
-                                        reduction = integrated.reduction.label,
-                                        dims = 1:30, graph.name = "int_snn")
+                                        reduction = integrated.reduction.label, 
+					dims = 1:30,
+					graph.name = c("int_nn", "int_snn"))
 
 # # --- post-integration UMAP (note the reduction name) ---
 seurat5.obj.integrated <- RunUMAP(
