@@ -163,21 +163,22 @@ current.params <- upstream_params(
 stop_if_stale(seurat5.obj.integrated, current.params)
 
 # 3) The clustering graph must be present.
-if (!("int_snn" %in% names(seurat5.obj.integrated@graphs))) {
-  stop("The 'int_snn' graph is missing from the integrated object. ",
-       "Re-run part 2a, which builds it before saving.")
-}
+g <- seurat5.obj.integrated@graphs[["int_snn"]]
+if (is.null(g)) stop("The 'int_snn' graph is missing ... re-run part 2a.")
+if (all(g@x == 1)) stop("'int_snn' holds a nearest-neighbor graph, not an SNN graph. ",
+                        "Part 2a must pass graph.name = c('int_nn','int_snn').")
 ```
 
 ## Clustering
 
 ```{r run_clustering}
 # Resolution comes from the config value (proposed by 2a, or your override).
-if (is.null(p2$clustering_resolution_value)) {
-  stop("clustering_resolution_value is not set in the config. ",
-       "Run part 2a to propose one, or set it by hand.")
-}
-best_res <- as.numeric(p2$clustering_resolution_value)
+rv <- p2$clustering_resolution_value
+if (is.null(rv) || identical(as.character(rv), "None") || is.na(suppressWarnings(as.numeric(rv))))
+  stop("clustering_resolution_value is not set. Run part 2a to propose one, or set it by hand.")
+best_res <- as.numeric(rv)
+
+
 cat("Clustering at resolution:", best_res, "\n")
 
 seurat5.obj.integrated <- FindClusters(seurat5.obj.integrated,
