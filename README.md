@@ -134,6 +134,25 @@ used as a fallback) plus `metrics_summary.csv` for the sequencing-QC table. Raw
 is required if you enable SoupX. Samples with a missing `metrics_summary.csv` are
 warned about and simply omitted from the metrics table rather than crashing.
 
+### Part 1
+Primarily for setting 
+
+Defaults to running soupX. If running PIPseq samples, set `generate_metrics_tables`
+to FALSE
+
+```yaml
+analysis:
+  run_tests: no
+  node_type: analytics
+  part1:
+    part1_rds_save_filename: _0_raw_seurat_object.RDS
+    part1_report_tables_filename: part1_tables_for_report.RData
+    part1_suffix: ''
+    generate_metrics_tables: 'TRUE'
+    run_SoupX: 'TRUE'
+    ggplot_dir: ggplot
+```
+  
 ### QC cutoffs (part 2a) — set these *after* reading the part 1 PDF
 
 ```yaml

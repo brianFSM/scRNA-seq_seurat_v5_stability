@@ -22,7 +22,7 @@ analysis:
     part1_report_tables_filename: part1_tables_for_report.RData
     part1_suffix: ''
     generate_metrics_tables: 'TRUE'
-    run_SoupX: 'FALSE'
+    run_SoupX: 'TRUE'
     ggplot_dir: ggplot
   part2:
     mito_ceiling: 5
