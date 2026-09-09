@@ -258,7 +258,8 @@ qc.counts.raw <- qc_long(list(nCount_RNA   = nCount_data,
 
 p.qc.counts <- qc_facet_plot(qc.counts.raw, log.y = TRUE)
 p.qc.counts
-save_png_plot(p.qc.counts, "qc_counts_raw_facet.png", ggplot.directory,
+
+save_png_plot(p.qc.counts, plot_path(ggplot.directory, "qc_counts_raw_facet.png"),
               width = 7, height = 3.6)
 ```
 

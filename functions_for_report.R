@@ -43,12 +43,9 @@ sanitize_sample_names <- function(formatted.samples){
 # This got complicated as I was learning about how ggsave saves images (i.e. 
 # be default it saves huge images) and how the pdf rendering presents those
 # images (i.e. it makes them huge if they're save huge)
-save_png_plot <- function(p, filename, ggplot.dir,
-                          width = 7, height = 5, dpi = 150) {
-
-	if (!dir.exists(ggplot.dir)) dir.create(ggplot.dir, recursive = TRUE, showWarnings = FALSE) 
-	out <- file.path(ggplot.dir,  filename) 
-	print(out)
+save_png_plot <- function(p, path, width = 7, height = 5, dpi = 150) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  out <- path
 	
 	# works for ggplot or any grid grob via cowplot::ggdraw 
 	if (inherits(p, "ggplot")) { 
@@ -361,20 +358,34 @@ shaded_vln_boxplot <- function(data,
     ggtitle(title)
 }
 
+# Single rule for suffixing an output filename. `suffix` may be given with or
+# without a leading separator ("alt" and "_alt" both yield "_alt"); an empty
+# suffix leaves the name untouched.
+with_suffix <- function(filename, suffix = "") {
+  if (!nzchar(suffix)) return(filename)
+  if (!grepl("^[._-]", suffix)) suffix <- paste0("_", suffix)
+  root <- tools::file_path_sans_ext(filename)
+  ext  <- tools::file_ext(filename)
+  paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "")
+}
 
-# Single source of truth for marker-plot filenames. Both the writer
-# (feat_plots_top_genes, part 2) and the reader (part 3 summary) call this, so
-# the two can never disagree on the suffix/assay/cluster naming scheme.
-marker_plot_path <- function(ggplot.dir,
-                             cluster.num,
-                             kind = c("feat", "vln", "dot"),
-                             assay.used = "SCT",
-                             filename.suffix = "") {
+# Full path to a figure in the ggplot directory. Same shape as marker_plot_path()
+# so writer and reader can't disagree.
+plot_path <- function(ggplot.dir, filename, filename.suffix = "") {
+  file.path(ggplot.dir, with_suffix(filename, filename.suffix))
+}
+
+suffix_path <- function(base_dir, filename, suffix = "") {
+  file.path(base_dir, with_suffix(filename, suffix))
+}
+
+marker_plot_path <- function(ggplot.dir, cluster.num, kind = c("feat", "vln", "dot"),
+                             assay.used = "SCT", filename.suffix = "") {
   kind <- match.arg(kind)
   tag  <- switch(kind, feat = "featPlot", vln = "vlnPlot", dot = "dotPlot")
-  fn   <- paste0("clustering_", filename.suffix,
-                 "_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png")
-  file.path(ggplot.dir, fn)
+  plot_path(ggplot.dir,
+            paste0("clustering_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png"),
+            filename.suffix)
 }
 
 

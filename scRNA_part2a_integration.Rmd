@@ -276,7 +276,9 @@ thr.counts <- qc_thresholds(
 
 p.qc.counts <- qc_facet_plot(qc.counts, thresholds = thr.counts, log.y = TRUE)
 p.qc.counts
-save_png_plot(p.qc.counts, "qc_counts_before_after.png", ggplot.directory,
+
+save_png_plot(p.qc.counts, 
+              plot.path(ggplot.directory, "qc_counts_before_after.png", part2.suffix),
               width = 6.5, height = 5)
 ```
 
@@ -299,8 +301,9 @@ thr.pct <- qc_thresholds(
 
 p.qc.pct <- qc_facet_plot(qc.pct, thresholds = thr.pct)
 p.qc.pct
-save_png_plot(p.qc.pct, "qc_percent_before_after.png", ggplot.directory,
-              width = 6.5, height = 6.5)
+save_png_plot(p.qc.pct,
+              plot_path(ggplot.directory, "qc_percent_before_after.png", part2.suffix),
+              width = 9, height = 11)
 ```
 
 # Analysis without integration
@@ -401,7 +404,9 @@ merged.dimplot <- DimPlot(seurat5.obj,
                           shuffle = TRUE,
                           raster=FALSE)
 
-save_png_plot(merged.dimplot, "umap_merged_seruat_obj.png", ggplot.directory)
+
+save_png_plot(merged.dimplot, 
+              plot.path(ggplot.directory, "umap_merged_seruat_obj.png", part2.suffix)
 merged.dimplot
 ```
 
@@ -553,7 +558,9 @@ p.stab <- ggplot(stability.df, aes(x = factor(resolution), y = median)) +
   ) +
   theme_minimal()
 
-save_png_plot(p.stab, paste0("stability_vs_resolution", part2.suffix, ".png"), ggplot.directory, width = 8, height = 6)
+save_png_plot(p.stab,
+              plot_path(ggplot.directory, "stability_vs_resolution.png", part2.suffix),
+              width = 8, height = 6)
 p.stab
 ```
 
@@ -568,7 +575,9 @@ for (res in resolutions) {
                                          resolution = res, verbose = FALSE)
 }
 clustree.plot <- clustree::clustree(seurat5.obj.integrated, prefix = "int_snn_res.")
-save_png_plot(clustree.plot, paste0("clustree", part2.suffix, ".png"), ggplot.directory, width = 9, height = 11)
+save_png_plot(clustree.plot,
+              plot_path(ggplot.directory, "clustree.png", part2.suffix),
+              width = 9, height = 11)
 clustree.plot
 ```
 

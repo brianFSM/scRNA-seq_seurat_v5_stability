@@ -266,7 +266,10 @@ integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated,
 #                                         split.by = "sample_id", 
 #                                         ncol = 2) + NoLegend()
 
-save_png_plot(integrated.dimplot.by.sample, "integrated_umap_by_sample.png", ggplot.directory)
+
+save_png_plot(integrated.dimplot.by.sample, 
+              plot_path(ggplot.directory, "integrated_umap_by_sample.png", part2.suffix))
+              
 integrated.dimplot.by.sample
 
 ```
@@ -278,7 +281,9 @@ integrated.dimplot.by.cluster <- DimPlot(seurat5.obj.integrated,
                               group.by = clustering.resolution,
                               label = TRUE)
 
-save_png_plot(integrated.dimplot.by.cluster, "integrated_umap_by_cluster.png", ggplot.directory)
+save_png_plot(integrated.dimplot.by.cluster, 
+              plot_path(ggplot.directory, "integrated_umap_by_cluster.png", part2.suffix))
+
 integrated.dimplot.by.cluster
 ```
 
@@ -289,7 +294,8 @@ pca_post <- DimPlot(seurat5.obj.integrated, reduction = "pca", group.by = "sampl
 
 
 pca_post
-save_png_plot(pca_post, "pca_integrated.png", ggplot.directory)
+save_png_plot(pca_post, 
+              plot_path(ggplot_directory, "pca_integrated.png", part2.suffix))
 ```
 
 # Find Markers
