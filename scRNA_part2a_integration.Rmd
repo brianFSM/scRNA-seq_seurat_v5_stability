@@ -203,26 +203,6 @@ write.csv(combo.table, file.path(r.obj.loc, "filtering_stats_table.csv"), quote=
 ```
 
 ```{r cells_lost_to_filtering}
-qc_attrition <- function(md, spec) {
-  fails <- vapply(names(spec), function(nm) {
-    v <- md[[nm]]; b <- spec[[nm]]
-    f <- rep(FALSE, length(v))
-    if (!is.na(b["lower"])) f <- f | v <  b["lower"]
-    if (!is.na(b["upper"])) f <- f | v >  b["upper"]
-    f
-  }, logical(nrow(md)))
-
-  n.fail <- colSums(fails)
-  data.frame(
-    criterion = names(spec),
-    bound = vapply(spec, function(b) paste(na.omit(c(
-      if (!is.na(b["lower"])) paste0(">= ", b["lower"]),
-      if (!is.na(b["upper"])) paste0("<= ", b["upper"]))), collapse = ", "), ""),
-    cells_lost      = n.fail,
-    lost_only_here  = colSums(fails & rowSums(fails) == 1),
-    pct_of_total    = round(100 * n.fail / nrow(md), 2),
-    row.names = NULL)
-}
 
 qc.spec <- list(
   nCount_RNA   = c(lower = RNA.count.floor,     upper = RNA.count.ceiling),
