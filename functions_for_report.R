@@ -367,117 +367,127 @@ shaded_vln_boxplot <- function(data,
 # the two can never disagree on the suffix/assay/cluster naming scheme.
 marker_plot_path <- function(ggplot.dir,
                              cluster.num,
-                             kind = c("feat", "vln"),
+                             kind = c("feat", "vln", "dot"),
                              assay.used = "SCT",
                              filename.suffix = "") {
   kind <- match.arg(kind)
-  tag  <- if (kind == "feat") "featPlot" else "vlnPlot"
+  tag  <- switch(kind, feat = "featPlot", vln = "vlnPlot", dot = "dotPlot")
   fn   <- paste0("clustering_", filename.suffix,
                  "_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png")
   file.path(ggplot.dir, fn)
 }
 
 
+# Assemble a list of per-gene panels into a titled grid and write it to disk.
+# Shared by the feature- and violin-plot branches of feat_plots_top_genes().
+save_panel_grid <- function(panels, title, path, num_cols, base_text,
+                            width, height, dpi) {
+  panels <- lapply(panels, function(p) {
+    p + theme(
+      axis.text.x = element_text(size = base_text, angle = 45, hjust = 1),
+      axis.text.y = element_text(size = base_text),
+      plot.title  = element_text(size = base_text + 1)
+    )
+  })
+  grid  <- cowplot::plot_grid(plotlist = panels, ncol = num_cols)
+  head  <- cowplot::ggdraw() + cowplot::draw_label(title, fontface = "bold",
+                                                   size = base_text + 2)
+  final <- cowplot::plot_grid(head, grid, ncol = 1, rel_heights = c(0.12, 1))
+  ggplot2::ggsave(filename = path, plot = final, width = width, height = height,
+                  units = "in", dpi = dpi, limitsize = TRUE)
+  invisible(path)
+}
+
+
+# Marker plots for one cluster.
+#
+# `plots` selects which panels to draw; any subset of:
+#   "feat" - UMAP feature plots, one panel per gene (grid)
+#   "dot"  - single dot plot, genes x all clusters (mean expr + % expressing)
+#   "vln"  - violin plots, one panel per gene (grid). Off by default: the dot
+#            plot answers "is this gene cluster-specific" more compactly, but
+#            violins show the within-cluster distribution, which the dot plot
+#            hides. Turn on when you need to see bimodality or a marker driven
+#            by a handful of high-expressing cells.
+#
+# Returns a named list of the paths actually written (invisibly), or NULL for a
+# cluster with no markers.
 feat_plots_top_genes <- function(cluster.num,
                                  seurat.obj,
                                  marker.genes.df,
                                  filename.suffix,
                                  ggplot.dir,
+                                 plots = c("feat", "dot"),
                                  assay.used = "SCT",
                                  genes_per_page = 6,
-                                 fig_width = 9,     # inches
-                                 fig_height = 10,    # inches
+                                 fig_width = 9,
+                                 fig_height = 10,
+                                 dot_height = 5,
                                  dpi = 150,
                                  num_cols = 3,
                                  umap_pt_size = 0.02,
                                  vln_pt_size = 0.05,
                                  base_text = 10,
                                  this_reduction = "umap.postint",
-                                 to_raster=FALSE) {
+                                 to_raster = FALSE) {
   
+  plots <- match.arg(plots, choices = c("feat", "vln", "dot"), several.ok = TRUE)
   if (!dir.exists(ggplot.dir)) dir.create(ggplot.dir, recursive = TRUE, showWarnings = FALSE)
   
-  # paths (via shared helper so part 3 can reconstruct them identically)
-  feat.plot.path <- marker_plot_path(ggplot.dir, cluster.num, "feat", assay.used, filename.suffix)
-  vln.plot.path  <- marker_plot_path(ggplot.dir, cluster.num, "vln",  assay.used, filename.suffix)
-  
-  # gene list
   curr.markers <- marker.genes.df[marker.genes.df$cluster == cluster.num, ]
-  genes <- na.omit(curr.markers$gene)
+  genes <- as.character(na.omit(curr.markers$gene))
   genes <- genes[seq_len(min(length(genes), genes_per_page))]
   
-  # ---------- FEATURE PLOTS (rasterized) ----------
-  if ("patchwork" %in% (.packages())) detach("package:patchwork", unload = TRUE)
+  # A cluster can legitimately have no positive markers (only.pos = TRUE).
+  if (length(genes) == 0) {
+    message("Cluster ", cluster.num, ": no marker genes, skipping plots.")
+    return(invisible(NULL))
+  }
   
-  fp_list <- Seurat::FeaturePlot(
-    seurat.obj,
-    features   = genes,
-    reduction  = this_reduction,
-    cols       = c("grey85", "navy"),
-    ncol       = num_cols,
-    pt.size    = umap_pt_size,
-    label.size = base_text,
-    combine    = FALSE,
-    raster     = to_raster,        # <- key for file size & speed
-    raster.dpi = c(dpi, dpi)
-  )
+  out <- list()
   
-  fp_list <- lapply(fp_list, function(p) {
-    p +
-      theme(
-        axis.text.x = element_text(size = base_text, angle = 45, hjust = 1),
-        axis.text.y = element_text(size = base_text),
-        plot.title  = element_text(size = base_text + 1)
-      )
-  })
+  if ("feat" %in% plots) {
+    out$feature_plot <- save_panel_grid(
+      panels = Seurat::FeaturePlot(
+        seurat.obj, features = genes, reduction = this_reduction,
+        cols = c("grey85", "navy"), ncol = num_cols, pt.size = umap_pt_size,
+        label.size = base_text, combine = FALSE,
+        raster = to_raster, raster.dpi = c(dpi, dpi)),
+      title  = paste0("Cluster ", cluster.num, " — top marker features"),
+      path   = marker_plot_path(ggplot.dir, cluster.num, "feat", assay.used, filename.suffix),
+      num_cols = num_cols, base_text = base_text,
+      width = fig_width, height = fig_height, dpi = dpi)
+  }
   
-  fp_grid <- cowplot::plot_grid(plotlist = fp_list, ncol = 3)
-  title_g <- cowplot::ggdraw() + cowplot::draw_label(
-    paste0("Cluster ", cluster.num, " — top marker features"),
-    fontface = "bold", size = base_text + 2
-  )
-  fp_final <- cowplot::plot_grid(title_g, fp_grid, ncol = 1, rel_heights = c(0.12, 1))
+  if ("vln" %in% plots) {
+    out$violin_plot <- save_panel_grid(
+      panels = Seurat::VlnPlot(
+        seurat.obj, features = genes, pt.size = vln_pt_size, combine = FALSE),
+      title  = paste0("Cluster ", cluster.num, " — top marker violins"),
+      path   = marker_plot_path(ggplot.dir, cluster.num, "vln", assay.used, filename.suffix),
+      num_cols = num_cols, base_text = base_text,
+      width = fig_width, height = fig_height, dpi = dpi)
+  }
   
-  ggplot2::ggsave(
-    filename = feat.plot.path, plot = fp_final,
-    width = fig_width, height = fig_height, units = "in",
-    dpi = dpi, limitsize = TRUE
-  )
+  if ("dot" %in% plots) {
+    # DotPlot returns ONE ggplot covering all clusters, so no grid assembly.
+    dot.plot.path <- marker_plot_path(ggplot.dir, cluster.num, "dot", assay.used, filename.suffix)
+    dp <- Seurat::DotPlot(seurat.obj, features = genes, assay = assay.used) +
+      ggtitle(paste0("Cluster ", cluster.num, " — top markers across all clusters")) +
+      theme(axis.text.x = element_text(size = base_text, angle = 45, hjust = 1),
+            axis.text.y = element_text(size = base_text),
+            plot.title  = element_text(size = base_text + 1, face = "bold"))
+    ggplot2::ggsave(filename = dot.plot.path, plot = dp,
+                    width = fig_width, height = dot_height, units = "in",
+                    dpi = dpi, limitsize = TRUE)
+    out$dot_plot <- dot.plot.path
+  }
   
-  # ---------- VIOLIN PLOTS ----------
-  vp_list <- Seurat::VlnPlot(
-    object   = seurat.obj,
-    features = genes,
-    pt.size  = vln_pt_size,
-    combine  = FALSE
-  )
-  
-  vp_list <- lapply(vp_list, function(p) {
-    p +
-      theme(
-        axis.text.x = element_text(size = base_text, angle = 45, hjust = 1),
-        axis.text.y = element_text(size = base_text),
-        plot.title  = element_text(size = base_text + 1)
-      )
-  })
-  
-  vp_grid  <- cowplot::plot_grid(plotlist = vp_list, ncol = num_cols)
-  title_v  <- cowplot::ggdraw() + cowplot::draw_label(
-    paste0("Cluster ", cluster.num, " — top marker violins"),
-    fontface = "bold", size = base_text + 2
-  )
-  vp_final <- cowplot::plot_grid(title_v, vp_grid, ncol = 1, rel_heights = c(0.12, 1))
-  
-  ggplot2::ggsave(
-    filename = vln.plot.path, plot = vp_final,
-    width = fig_width, height = fig_height, units = "in",
-    dpi = dpi, limitsize = TRUE
-  )
-  
-  invisible(list(feature_plot = feat.plot.path, violin_plot = vln.plot.path))
+  invisible(out)
 }
 
 
+  
 ################################################################################
 # Part 2a / 2b split: handoff staleness + stability-based resolution selection
 ################################################################################
@@ -553,7 +563,8 @@ stop_if_stale <- function(obj, current.params) {
 #              threshold = <numeric>, chosen_resolution = <numeric>).
 select_resolution_by_stability <- function(obj,
                                             resolutions,
-                                            graph.name = "int_snn",
+                                            graph.name = "int_snn", 
+					    nn.graph.name = "int_nn", 
                                             reduction  = "integrated.rpca",
                                             dims       = 1:30,
                                             n_subsample = 5,
@@ -597,7 +608,7 @@ select_resolution_by_stability <- function(obj,
       cells.b <- sample(all.cells, floor(length(all.cells) * subsample_frac))
       sub <- subset(obj, cells = cells.b)
       sub <- FindNeighbors(sub, reduction = reduction, dims = dims,
-                           graph.name = graph.name, verbose = FALSE)
+                           graph.name = c(nn.graph.name, graph.name), verbose = FALSE)
       sub <- FindClusters(sub, graph.name = graph.name,
                           resolution = res, verbose = FALSE)
       test.lab <- stats::setNames(as.character(Idents(sub)), colnames(sub))
