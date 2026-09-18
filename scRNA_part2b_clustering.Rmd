@@ -73,7 +73,8 @@ cfg.analysis <- cfg$analysis
 p1  <- cfg.analysis$part1
 p2 <- cfg.analysis$part2
 
-r.obj.loc <- cfg$data$`rds-file-path`
+base.obj.loc <- cfg$data$`rds-file-path`   # shared root: part 1 artifacts
+r.obj.loc    <- run_dir(cfg)               # this run's outputs (created if absent)
 organism <- cfg$project$organism
 
 ################################################################################
@@ -99,22 +100,23 @@ if (run.doubletFinder){
 # I/O paths
 ################################################################################
 part1.suffix <- p1$part1_suffix
-part2.suffix <- p2$part2_suffix
+run.name     <- cfg.analysis$run_name %||% "default"
 
-unfiltered.seurat.obj.path    <- suffix_path(r.obj.loc, p1$part1_rds_save_filename,  part1.suffix)
-merged.seurat.obj.path <- suffix_path(r.obj.loc, p2$merged_seurat_obj_file, part2.suffix)
-integrated.seurat.obj.path <- suffix_path(r.obj.loc, p2$integrated_seurat_obj_file, part2.suffix)
-QC.tables.path         <- suffix_path(r.obj.loc, p1$part1_report_tables_filename, part1.suffix)
-ggplot.directory       <- file.path(r.obj.loc, p1$ggplot_dir)
-marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
+# Part 1 artifacts are shared across runs and live at the SHARED ROOT.
+unfiltered.seurat.obj.path <- suffix_path(base.obj.loc, p1$part1_rds_save_filename,      part1.suffix)
+QC.tables.path             <- suffix_path(base.obj.loc, p1$part1_report_tables_filename, part1.suffix)
 
-  if (!file.exists(ggplot.directory)) {
- dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
-}
+# Everything in THIS RUN. No filename suffixes: the run directory keeps
+# alternate runs apart. 2b reads 2a's integrated object and writes a SEPARATE
+# clustered object, so 2a's output is never clobbered.
+merged.seurat.obj.path     <- file.path(r.obj.loc, p2$merged_seurat_obj_file)
+integrated.seurat.obj.path <- file.path(r.obj.loc, p2$integrated_seurat_obj_file)
+clustered.seurat.obj.path  <- file.path(r.obj.loc, p2$clustered_seurat_obj_file)
+ggplot.directory           <- file.path(r.obj.loc, p1$ggplot_dir)
+marker.gene.dir            <- file.path(r.obj.loc, p2$marker_gene_dir)
 
-if (!file.exists(marker.gene.dir)) {
- dir.create(marker.gene.dir, showWarnings = FALSE, recursive = TRUE)
-}
+for (d in c(ggplot.directory, marker.gene.dir))
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
 
 
 ```
@@ -148,7 +150,7 @@ override by hand, then runs marker discovery and plots.
 # 1) The integrated object must exist.
 if (!file.exists(integrated.seurat.obj.path)) {
   stop("Integrated object not found at ", integrated.seurat.obj.path,
-       "\nRun part 2a first (or check part1/part2 suffixes in the config).")
+       "\nRun part 2a first, or check run_name / part1_suffix in the config.")
 }
 
 seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
@@ -158,7 +160,7 @@ seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
 #    this object is stale and 2a must be re-run.
 current.params <- upstream_params(
   p2 = p2, run.doubletFinder = run.doubletFinder,
-  organism = organism, part1.suffix = part1.suffix, part2.suffix = part2.suffix
+  organism = organism, part1.suffix = part1.suffix, run.name = run.name
 )
 stop_if_stale(seurat5.obj.integrated, current.params)
 
@@ -174,9 +176,20 @@ if (all(g@x == 1)) stop("'int_snn' holds a nearest-neighbor graph, not an SNN gr
 ```{r run_clustering}
 # Resolution comes from the config value (proposed by 2a, or your override).
 rv <- p2$clustering_resolution_value
-if (is.null(rv) || identical(as.character(rv), "None") || is.na(suppressWarnings(as.numeric(rv))))
-  stop("clustering_resolution_value is not set. Run part 2a to propose one, or set it by hand.")
-best_res <- as.numeric(rv)
+best_res <- if (is.null(rv) || identical(tolower(as.character(rv)), "auto")) {
+  pr <- seurat5.obj.integrated@misc$proposed_resolution
+  if (is.null(pr))
+    stop("clustering_resolution_value is 'auto' but part 2a recorded no ",
+         "proposal in the object. Re-run part 2a, or set a number by hand.")
+  message("Using part 2a's proposed resolution: ", pr)
+  pr
+} else {
+  n <- suppressWarnings(as.numeric(rv))
+  if (is.na(n))
+    stop("clustering_resolution_value must be a number or 'auto', got: ", rv)
+  message("Using manual override: ", n)
+  n
+}
 
 
 cat("Clustering at resolution:", best_res, "\n")
@@ -188,6 +201,18 @@ seurat5.obj.integrated <- FindClusters(seurat5.obj.integrated,
 
 cluster.res.prefix <- "int_snn_res."
 clustering.resolution <- paste0(cluster.res.prefix, best_res)
+
+# FindClusters names the column paste0(graph.name, "_res.", resolution), so the
+# line above normally matches - but numeric formatting (0.50 -> "0.5") can make
+# it drift. Fail here with the available columns rather than 15 lines later
+# with a subscript-out-of-bounds.
+if (!clustering.resolution %in% colnames(seurat5.obj.integrated[[]])) {
+  have <- grep(paste0("^", cluster.res.prefix),
+               colnames(seurat5.obj.integrated[[]]), value = TRUE)
+  stop("Expected metadata column '", clustering.resolution, "' after ",
+       "FindClusters, but it is absent. Columns present: ",
+       paste(have, collapse = ", "))
+}
 num.clusters <- length(unique(Idents(seurat5.obj.integrated)))
 cat("Found", num.clusters, "clusters.\n")
 
@@ -207,17 +232,29 @@ seurat5.obj.integrated <- AddMetaData(seurat5.obj.integrated,
                                        metadata = new.clusters,
                                        col.name = clustering.resolution)
 
-saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
+saveRDS(seurat5.obj.integrated, clustered.seurat.obj.path, compress = FALSE)
 cat(paste0("Saved clustered object (resolution ", clustering.resolution,
-           ") to ", integrated.seurat.obj.path, "\n"))
+           ") to ", clustered.seurat.obj.path, "\n"))
 
 ################################################################################
-# Write derived values back to config (authoritative label + cluster count).
-# clustering_resolution_value is left as-is so the knob the user set is preserved.
+# Record what this run actually did. config.yaml is input-only now, so this is
+# the record of the values that produced these outputs - part 3 reads it for
+# the parameters table in the client report.
 ################################################################################
-cfg$analysis$part2$clustering_resolution <- clustering.resolution
-cfg$analysis$part2$num_clusters <- num.clusters
-yaml::write_yaml(cfg, params$config.args)
+run.params <- data.frame(
+  parameter = c("Run name", "Organism", "SoupX", "DoubletFinder",
+                "Mito ceiling (%)", "nCount range", "nFeature range",
+                "Hemoglobin ceiling (%)", "Ribosomal floor (%)",
+                "Clustering resolution", "Clusters"),
+  value = as.character(c(
+    run.name, organism, p1$run_SoupX, run.doubletFinder,
+    mito.ceiling,
+    paste(RNA.count.floor, "-", RNA.count.ceiling),
+    paste(feature.count.floor, "-", feature.count.ceiling),
+    rbc.ceiling, ribo.floor,
+    best_res, num.clusters)),
+  stringsAsFactors = FALSE)
+write.csv(run.params, file.path(r.obj.loc, "run_parameters.csv"), row.names = FALSE)
 ```
 
 ## Table of cells from each sample per cluster
@@ -268,7 +305,7 @@ integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated,
 
 
 save_png_plot(integrated.dimplot.by.sample, 
-              plot_path(ggplot.directory, "integrated_umap_by_sample.png", part2.suffix))
+              plot_path(ggplot.directory, "integrated_umap_by_sample.png"))
               
 integrated.dimplot.by.sample
 
@@ -282,7 +319,7 @@ integrated.dimplot.by.cluster <- DimPlot(seurat5.obj.integrated,
                               label = TRUE)
 
 save_png_plot(integrated.dimplot.by.cluster, 
-              plot_path(ggplot.directory, "integrated_umap_by_cluster.png", part2.suffix))
+              plot_path(ggplot.directory, "integrated_umap_by_cluster.png"))
 
 integrated.dimplot.by.cluster
 ```
@@ -295,7 +332,7 @@ pca_post <- DimPlot(seurat5.obj.integrated, reduction = "pca", group.by = "sampl
 
 pca_post
 save_png_plot(pca_post, 
-              plot_path(ggplot_directory, "pca_integrated.png", part2.suffix))
+              plot_path(ggplot.directory, "pca_integrated.png"))
 ```
 
 # Find Markers
@@ -325,15 +362,14 @@ saveRDS(cluster.markers.sct, file=file.path(marker.gene.dir, "cluster_markers_sc
 # no up-regulated markers will legitimately have no file.
 clusters.present <- sort(unique(as.integer(as.character(cluster.markers.sct$cluster))))
 for (i in clusters.present){
-  table.filename <- file.path(marker.gene.dir, paste0("cluster", i, "_marker_genes_", clustering.resolution, ".csv"))
+  table.filename <- file.path(marker.gene.dir, paste0("cluster", i, "_marker_genes.csv"))
   these.markers <- cluster.markers.sct[cluster.markers.sct$cluster == i,]
   write.csv(x = these.markers, file = table.filename, quote = FALSE)
 }
 
-write.csv(cluster.markers.sct, 
-          file.path(marker.gene.dir, paste0("cluster_markers_", clustering.resolution, ".csv")))
+write.csv(cluster.markers.sct, file.path(marker.gene.dir, "cluster_markers.csv"))
 
-saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress=FALSE)
+saveRDS(seurat5.obj.integrated, clustered.seurat.obj.path, compress=FALSE)
 
 print("Saved final object, with prepSCTFindMarkers performed.")
 ```
@@ -361,15 +397,16 @@ saveRDS(cluster.markers.RNA, file=file.path(marker.gene.dir, "cluster_markers_RN
 markers <- cluster.markers.sct # or cluster.markers.RNA
 num.clusters.list <- sort(unique(markers$cluster))   # sorted, not hash order
 
-# Which marker plots to draw. Config-driven; default feat + dot.
-marker.plot.types <- p2$marker_plot_types %||% c("feat", "dot")
+# Which marker plots to draw. Config-driven; default feat + dot. unlist()
+# because a YAML sequence reads back as a list, and match.arg() in
+# feat_plots_top_genes() needs a character vector.
+marker.plot.types <- unlist(p2$marker_plot_types) %||% c("feat", "dot")
 
 invisible(lapply(num.clusters.list,
                  feat_plots_top_genes,
                  seurat.obj      = seurat5.obj.integrated,
                  marker.genes.df = markers,
                  ggplot.dir      = ggplot.directory,
-                 filename.suffix = part2.suffix,
                  plots           = marker.plot.types,
                  assay.used      = "SCT",
                  num_cols        = 3,
@@ -417,14 +454,13 @@ current.idents <- Idents(seurat5.obj.integrated)
 correct.levels <- as.character(sort(as.integer(levels(droplevels(current.idents)))))
 Idents(seurat5.obj.integrated) <- factor(current.idents, levels = correct.levels)
 
-# Update the config
+# Refresh the cluster count for your own reference. Nothing is written back to
+# config.yaml - it is input only.
 num.clusters <- length(levels(Idents(seurat5.obj.integrated)))
-cfg$analysis$part2$num_clusters <- num.clusters
-
-yaml::write_yaml(cfg, params$config.args)
+cat("Clusters remaining:", num.clusters, "\n")
 
 # And the object
-saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress=FALSE)
+saveRDS(seurat5.obj.integrated, clustered.seurat.obj.path, compress=FALSE)
 
 
 ################################################################################

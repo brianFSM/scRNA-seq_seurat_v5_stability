@@ -65,17 +65,19 @@ run.soupx <- as.logical(config.args$analysis$part1$run_SoupX)
 # Set output directory paths
 ################################################################################
 
-r.obj.loc <- config.args$data$`rds-file-path` # Output folder
+# Shared output root. Part 1's object, QC tables, and raw QC figures are
+# cutoff-independent, so they live here rather than inside a run directory.
+# Parts 2a/2b/3 write to <rds-file-path>/<run_name> instead - see run_dir().
+r.obj.loc <- config.args$data$`rds-file-path`
 
-# When trying different parameters in the analysis you can create
-# alternate output files with this 'suffix' argument in the config
+# part1_suffix keeps genuine part-1 variants apart (e.g. SoupX on vs off).
+# It is NOT the knob for QC-cutoff variants; those get their own run_name.
 part1.suffix <- config.args$analysis$part1$part1_suffix
-unfiltered.seurat.obj.file <- config.args$analysis$part1$part1_rds_save_filename
-unfiltered.seurat.obj.file <- sub(".RDS", paste0(part1.suffix, ".RDS"), unfiltered.seurat.obj.file)
-unfiltered.seurat.obj.path <- file.path(r.obj.loc, unfiltered.seurat.obj.file)
-QC.tables.file <- config.args$analysis$part1$part1_report_tables_filename
-QC.tables.file <-sub(".RData", paste0(part1.suffix, ".RData"), QC.tables.file)
-QC.tables.path <-file.path(r.obj.loc, QC.tables.file)
+
+unfiltered.seurat.obj.path <- suffix_path(
+  r.obj.loc, config.args$analysis$part1$part1_rds_save_filename, part1.suffix)
+QC.tables.path <- suffix_path(
+  r.obj.loc, config.args$analysis$part1$part1_report_tables_filename, part1.suffix)
 
 ggplot.directory.name <- config.args$analysis$part1$ggplot_dir
 ggplot.directory <- file.path(r.obj.loc, ggplot.directory.name)
@@ -147,7 +149,18 @@ This report was generated on `r formatted.date`
 
 ## Sample Names
 
-`r formatted.samples `
+```{r sample_name_list, results='asis'}
+# One per line. `formatted.samples` is what the user typed; `ids` is the
+# sanitized form used for directory lookup and cell-name prefixes. They are
+# usually identical - annotate only when sanitizing actually changed something,
+# so a mismatch between the config and the folder on disk is visible here
+# rather than surfacing later as a "could not locate 10x matrix" error.
+changed <- formatted.samples != ids
+cat(paste0("* ", formatted.samples,
+           ifelse(changed, paste0(" (read as `", ids, "`)"), "")),
+    sep = "\n")
+cat("\n")
+```
 
 
 # Part 1: Loading data from CellRanger into R
@@ -171,7 +184,28 @@ render_formatted_table(qc.table)
 
 Objects created for:
 
-
+```{r soupx_explainer, eval=run.soupx, results='asis'}
+cat(c(
+"### Ambient RNA correction (SoupX)",
+"",
+"One plot per sample, in the order listed above, each titled with its sample",
+"name. Each is an independent estimate of that sample's *contamination",
+"fraction* (rho): the proportion of counts in a droplet that came from",
+"free-floating RNA in the cell suspension rather than from the cell captured in",
+"that droplet.",
+"",
+"**Reading them:** a single sharp peak means the candidate estimators agreed and",
+"the estimate is trustworthy. A broad, flat, or multi-peaked curve means they",
+"did not, and the correction for that sample deserves more scepticism. A point",
+"estimate sitting at the bottom edge of its own interval means contamination is",
+"at or below what the method can resolve, and the correction is close to a",
+"no-op. Estimates above roughly 10-20% are worth raising with whoever prepared",
+"the sample rather than simply correcting away.",
+"",
+"Corrected counts replace the raw counts from here on; the QC distributions",
+"below are computed after this adjustment.",
+""), sep = "\n")
+```
 
 ```{r make_seurat_objs}
 # To avoid any future.globals.maxSize errors:
@@ -273,7 +307,7 @@ qc.pct.raw <- qc_long(list(percent.mt   = percent_mt_data,
 
 p.qc.pct <- qc_facet_plot(qc.pct.raw, facet.nrow = 2)
 p.qc.pct
-save_png_plot(p.qc.pct, "qc_percent_raw_facet.png", ggplot.directory,
+save_png_plot(p.qc.pct, plot_path(ggplot.directory, "qc_percent_raw_facet.png"),
               width = 7, height = 5.5)
 ```
 
@@ -318,3 +352,4 @@ saveRDS(seurat.obj.v5, unfiltered.seurat.obj.path)
 ```{r sessioninfo, eval=TRUE}
 sessionInfo()
 ```
+

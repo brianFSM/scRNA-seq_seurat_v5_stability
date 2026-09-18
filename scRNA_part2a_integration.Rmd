@@ -72,7 +72,8 @@ cfg.analysis <- cfg$analysis
 p1  <- cfg.analysis$part1
 p2 <- cfg.analysis$part2
 
-r.obj.loc <- cfg$data$`rds-file-path`
+base.obj.loc <- cfg$data$`rds-file-path`   # shared root: part 1 artifacts
+r.obj.loc    <- run_dir(cfg)               # this run's outputs (created if absent)
 organism <- cfg$project$organism
 
 ################################################################################
@@ -98,24 +99,22 @@ if (run.doubletFinder){
 # I/O paths
 ################################################################################
 part1.suffix <- p1$part1_suffix
-part2.suffix <- p2$part2_suffix
+run.name     <- cfg.analysis$run_name %||% "default"
 
-unfiltered.seurat.obj.path    <- suffix_path(r.obj.loc, p1$part1_rds_save_filename,  part1.suffix)
-merged.seurat.obj.path <- suffix_path(r.obj.loc, p2$merged_seurat_obj_file, part2.suffix)
-integrated.seurat.obj.path <- suffix_path(r.obj.loc, p2$integrated_seurat_obj_file, part2.suffix)
-QC.tables.path         <- suffix_path(r.obj.loc, p1$part1_report_tables_filename, part1.suffix)
-part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, part2.suffix)
+# Part 1 artifacts are shared across runs and live at the SHARED ROOT.
+unfiltered.seurat.obj.path <- suffix_path(base.obj.loc, p1$part1_rds_save_filename,      part1.suffix)
+QC.tables.path             <- suffix_path(base.obj.loc, p1$part1_report_tables_filename, part1.suffix)
 
-ggplot.directory       <- file.path(r.obj.loc, p1$ggplot_dir)
-marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
+# Everything 2a produces belongs to THIS RUN. No filename suffixes: the run
+# directory is what keeps alternate runs apart.
+merged.seurat.obj.path     <- file.path(r.obj.loc, p2$merged_seurat_obj_file)
+integrated.seurat.obj.path <- file.path(r.obj.loc, p2$integrated_seurat_obj_file)
+part2.tables.path          <- file.path(r.obj.loc, p2$part2_report_tables_filename)
+ggplot.directory           <- file.path(r.obj.loc, p1$ggplot_dir)
+marker.gene.dir            <- file.path(r.obj.loc, p2$marker_gene_dir)
 
-  if (!file.exists(ggplot.directory)) {
- dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
-}
-
-if (!file.exists(marker.gene.dir)) {
- dir.create(marker.gene.dir, showWarnings = FALSE, recursive = TRUE)
-}
+for (d in c(ggplot.directory, marker.gene.dir))
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
 
 
 ```
@@ -278,7 +277,7 @@ p.qc.counts <- qc_facet_plot(qc.counts, thresholds = thr.counts, log.y = TRUE)
 p.qc.counts
 
 save_png_plot(p.qc.counts, 
-              plot.path(ggplot.directory, "qc_counts_before_after.png", part2.suffix),
+              plot_path(ggplot.directory, "qc_counts_before_after.png"),
               width = 6.5, height = 5)
 ```
 
@@ -302,8 +301,8 @@ thr.pct <- qc_thresholds(
 p.qc.pct <- qc_facet_plot(qc.pct, thresholds = thr.pct)
 p.qc.pct
 save_png_plot(p.qc.pct,
-              plot_path(ggplot.directory, "qc_percent_before_after.png", part2.suffix),
-              width = 9, height = 11)
+              plot_path(ggplot.directory, "qc_percent_before_after.png"),
+              width = 6.5, height = 6.5)
 ```
 
 # Analysis without integration
@@ -405,8 +404,8 @@ merged.dimplot <- DimPlot(seurat5.obj,
                           raster=FALSE)
 
 
-save_png_plot(merged.dimplot, 
-              plot.path(ggplot.directory, "umap_merged_seruat_obj.png", part2.suffix)
+save_png_plot(merged.dimplot,
+              plot_path(ggplot.directory, "umap_merged_seruat_obj.png"))
 merged.dimplot
 ```
 
@@ -473,17 +472,25 @@ seurat5.obj.integrated <- RunUMAP(
 # handoff (i.e. an integrated object built under different QC / integration /
 # doublet settings than the current config).
 seurat5.obj.integrated@misc$upstream_params <- upstream_params(
-  p2               = p2,
+  p2                = p2,
   run.doubletFinder = run.doubletFinder,
-  organism         = organism,
-  part1.suffix     = part1.suffix,
-  part2.suffix     = part2.suffix
+  organism          = organism,
+  part1.suffix      = part1.suffix,
+  run.name          = run.name
 )
 
 saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
 print(paste0("Saved integrated object (with int_snn graph) to ", integrated.seurat.obj.path))
 ```
 
+
+```{r read_obj_testing}
+seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
+
+integrated.reduction.label <- "integrated.rpca"
+
+
+```
 # Clustering resolution recommendation
 
 Part 2a does **not** commit to a final clustering. It scores a grid of
@@ -506,7 +513,9 @@ resolutions <- round(seq(res.min, res.max, res.step), 3)
 # Stability knobs (config-driven, with sensible defaults).
 n.sub  <- if (!is.null(p2$stability_reps))           as.integer(p2$stability_reps)           else 5L
 frac   <- if (!is.null(p2$stability_subsample_frac)) as.numeric(p2$stability_subsample_frac) else 0.8
-thresh <- if (!is.null(p2$stability_threshold))      as.numeric(p2$stability_threshold)      else 0.75
+# NOTE: there is deliberately no stability_threshold knob. The threshold is
+# derived from the data by select_resolution_by_stability() (highest lower-CI
+# bound across non-trivial resolutions), not set by the user.
 
 t0 <- Sys.time()
 stability    <- select_resolution_by_stability( 
@@ -527,12 +536,9 @@ cat("Data-derived threshold:", round(stability$threshold, 3),
 
 message("Stability sweep took ", round(difftime(Sys.time(), t0, units = "mins"), 2), " min")
 
-stability.df <- stability$summary
-proposed.res <- stability$chosen_resolution
-
 print(stability.df)
-cat("\nProposed resolution (finest that stays >= ", thresh, " stability): ",
-    proposed.res, "\n", sep = "")
+cat("\nProposed resolution (finest whose median clears the data-derived",
+    "threshold of", round(stability$threshold, 3), "):", proposed.res, "\n")
 ```
 
 ```{r stability_plot}
@@ -559,7 +565,7 @@ p.stab <- ggplot(stability.df, aes(x = factor(resolution), y = median)) +
   theme_minimal()
 
 save_png_plot(p.stab,
-              plot_path(ggplot.directory, "stability_vs_resolution.png", part2.suffix),
+              plot_path(ggplot.directory, "stability_vs_resolution.png"),
               width = 8, height = 6)
 p.stab
 ```
@@ -576,22 +582,30 @@ for (res in resolutions) {
 }
 clustree.plot <- clustree::clustree(seurat5.obj.integrated, prefix = "int_snn_res.")
 save_png_plot(clustree.plot,
-              plot_path(ggplot.directory, "clustree.png", part2.suffix),
+              plot_path(ggplot.directory, "clustree.png"),
               width = 9, height = 11)
 clustree.plot
 ```
 
-```{r write_proposed_resolution}
-# Write the PROPOSED resolution back to config as the value users can override.
-# Part 2b derives the label and writes the authoritative num_clusters after it
-# actually clusters; only the numeric value is written here.
-cfg$analysis$part2$clustering_resolution_value <- proposed.res
-yaml::write_yaml(cfg, params$config.args)
-cat("Wrote proposed clustering_resolution_value =", proposed.res, "to", params$config.args, "\n")
-cat("To override: edit clustering_resolution_value in config.yaml, then run part 2b.\n")
+```{r stamp_proposed_resolution}
+# 2a PROPOSES; it does not write to config.yaml. The proposal rides along in
+# the object, so config.yaml stays a pure input and a hand-set
+# clustering_resolution_value is never clobbered by re-running 2a.
+#
+# Second save: the first (above) happens before the sweep, so a sweep failure
+# still leaves a usable integrated object. This one adds the proposal - and,
+# if clustree ran, the int_snn_res.* columns it computed.
+seurat5.obj.integrated@misc$proposed_resolution <- proposed.res
+saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
+
+cat("Proposed resolution:", proposed.res, "\n")
+cat("Part 2b will use this unless clustering_resolution_value is set to a",
+    "number in the config (currently:",
+    as.character(p2$clustering_resolution_value %||% "auto"), ").\n")
 ```
 
 ## Session Information
 ```{r session_info_2a}
 sessionInfo()
 ```
+
