@@ -7,8 +7,6 @@
 .Rproj*
 .Rapp.history
 
-# Analysis scripts I'm using for reference
-*.R
 
 # Quarto/Rmd junk
 *_cache/
@@ -44,3 +42,6 @@ tmp/
 
 # The config I use for testing
 config.yaml
+
+# commit messages
+msg_*.txt
