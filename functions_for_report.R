@@ -1,25 +1,92 @@
-# functions_for_report.R
+i# functions_for_report.R
 
 
 # Null-coalescing helper (rlang provides one, but keep this dependency-free).
-# Defined first because run_dir() and upstream_params() both use it.
+# Defined first because the stage helpers below use it.
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 
-# Resolve this run's output directory: <rds-file-path>/<run_name>.
+################################################################################
+# Output layout: nested stage directories
 #
-# Part 1 writes to the shared root (its object is cutoff-independent, so
-# re-running it per QC variant is wasted work); parts 2a/2b/3 write here.
-# Creating the directory is idempotent, so every report can just call this.
-run_dir <- function(cfg, create = TRUE) {
-  base <- cfg$data$`rds-file-path`
-  if (is.null(base) || !nzchar(base))
+#   <rds-file-path>/part1[_<part1_suffix>]/
+#     part2a[_<part2a_suffix>]/
+#       res_<resolution>/          <- part 2b, 3, 4; the client deliverable
+################################################################################
+
+# Single rule for suffixing a name. `suffix` may be given with or without a
+# leading separator ("alt" and "_alt" both yield "_alt"); an empty suffix leaves
+# the name untouched.
+with_suffix <- function(filename, suffix = "") {
+  if (!nzchar(suffix)) return(filename)
+  if (!grepl("^[._-]", suffix)) suffix <- paste0("_", suffix)
+  root <- tools::file_path_sans_ext(filename)
+  ext  <- tools::file_ext(filename)
+  paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "")
+}
+
+# Directory name for a pipeline stage: fixed prefix + optional variant suffix.
+# A blank suffix yields the bare prefix, never "" - an empty name would collapse
+# the stage into its parent directory.
+stage_name <- function(prefix, suffix = "") {
+  suffix <- as.character(suffix %||% "")
+  if (grepl("[/\\\\]", suffix))
+    stop("Stage suffixes must be plain names, not paths. Got: ", suffix)
+  with_suffix(prefix, suffix)
+}
+
+# Canonical text form of a resolution, used for BOTH the res_<x> directory name
+# and proposed_resolution.txt, so writer and reader can never format it
+# differently (0.40 and 0.4 both become "0.4").
+format_res <- function(res) as.character(as.numeric(res))
+
+proposed_resolution_path <- function(part2a.dir)
+  file.path(part2a.dir, "proposed_resolution.txt")
+
+write_proposed_resolution <- function(part2a.dir, res)
+  writeLines(format_res(res), proposed_resolution_path(part2a.dir))
+
+# The resolution part 2b clusters at. A number in the config wins; 'auto' reads
+# the proposal part 2a wrote. Every stage that needs the resolution calls this,
+# so they cannot disagree.
+resolve_resolution <- function(cfg, part2a.dir) {
+  rv <- cfg$analysis$part2$clustering_resolution_value
+  if (is.null(rv) || identical(tolower(as.character(rv)), "auto")) {
+    f <- proposed_resolution_path(part2a.dir)
+    if (!file.exists(f))
+      stop("clustering_resolution_value is 'auto' but ", f, " does not exist. ",
+           "Run part 2a first, or set a number in the config.")
+    res <- suppressWarnings(as.numeric(readLines(f, n = 1)))
+    if (is.na(res)) stop(f, " does not contain a number.")
+    return(res)
+  }
+  res <- suppressWarnings(as.numeric(rv))
+  if (is.na(res))
+    stop("clustering_resolution_value must be a number or 'auto', got: ", rv)
+  res
+}
+
+# Every stage directory for this config.
+#   with.part2b: also resolve the resolution and the res_<x> directory. Off by
+#                default because under 'auto' it cannot be known until 2a ran.
+#   create:      which stages to create, e.g. "part2a". Readers pass nothing.
+stage_dirs <- function(cfg, with.part2b = FALSE, create = character(0)) {
+  root <- cfg$data$`rds-file-path`
+  if (is.null(root) || !nzchar(root))
     stop("data:rds-file-path is not set in the config.")
-  run <- cfg$analysis$run_name %||% "default"
-  if (grepl("[/\\\\]", run))
-    stop("analysis:run_name must be a single directory name, not a path. Got: ", run)
-  d <- file.path(base, run)
-  if (create) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+  d <- list()
+  d$part1  <- file.path(root,     stage_name("part1",  cfg$analysis$part1$part1_suffix))
+  d$part2a <- file.path(d$part1,  stage_name("part2a", cfg$analysis$part2$part2a_suffix))
+  if (with.part2b) {
+    d$resolution <- resolve_resolution(cfg, d$part2a)
+    d$part2b     <- file.path(d$part2a, paste0("res_", format_res(d$resolution)))
+  }
+
+  bad <- setdiff(create, names(d))
+  if (length(bad)) stop("stage_dirs(): cannot create unresolved stage(s): ",
+                        paste(bad, collapse = ", "))
+  for (s in create) dir.create(d[[s]], recursive = TRUE, showWarnings = FALSE)
   d
 }
 
@@ -377,37 +444,19 @@ shaded_vln_boxplot <- function(data,
     ggtitle(title)
 }
 
-# Single rule for suffixing an output filename. `suffix` may be given with or
-# without a leading separator ("alt" and "_alt" both yield "_alt"); an empty
-# suffix leaves the name untouched.
-with_suffix <- function(filename, suffix = "") {
-  if (!nzchar(suffix)) return(filename)
-  if (!grepl("^[._-]", suffix)) suffix <- paste0("_", suffix)
-  root <- tools::file_path_sans_ext(filename)
-  ext  <- tools::file_ext(filename)
-  paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "")
-}
-
 # Full path to a figure in the ggplot directory. Same shape as marker_plot_path()
-# so writer and reader can't disagree.
-plot_path <- function(ggplot.dir, filename, filename.suffix = "") {
-  file.path(ggplot.dir, with_suffix(filename, filename.suffix))
-}
-
-# Full path to a suffixed file in a directory. Used for part 1 artifacts,
-# which carry part1_suffix; part 2 outputs are separated by run directory
-# instead and pass no suffix.
-suffix_path <- function(base_dir, filename, suffix = "") {
-  file.path(base_dir, with_suffix(filename, suffix))
+# so writer and reader can't disagree. Filenames carry no suffixes: the stage
+# directory is the variant (see stage_dirs()).
+plot_path <- function(ggplot.dir, filename) {
+  file.path(ggplot.dir, filename)
 }
 
 marker_plot_path <- function(ggplot.dir, cluster.num, kind = c("feat", "vln", "dot"),
-                             assay.used = "SCT", filename.suffix = "") {
+                             assay.used = "SCT") {
   kind <- match.arg(kind)
   tag  <- switch(kind, feat = "featPlot", vln = "vlnPlot", dot = "dotPlot")
   plot_path(ggplot.dir,
-            paste0("clustering_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png"),
-            filename.suffix)
+            paste0("clustering_marker_gene_", tag, "_cl_", cluster.num, "_", assay.used, ".png"))
 }
 
 
@@ -449,11 +498,6 @@ feat_plots_top_genes <- function(cluster.num,
                                  seurat.obj,
                                  marker.genes.df,
                                  ggplot.dir,
-                                 # Defaults to "" like plot_path() and
-                                 # marker_plot_path(). Runs are separated by
-                                 # output directory, not by filename suffix, so
-                                 # callers normally omit this.
-                                 filename.suffix = "",
                                  plots = c("feat", "dot"),
                                  assay.used = "SCT",
                                  genes_per_page = 6,
@@ -491,7 +535,7 @@ feat_plots_top_genes <- function(cluster.num,
         label.size = base_text, combine = FALSE,
         raster = to_raster, raster.dpi = c(dpi, dpi)),
       title  = paste0("Cluster ", cluster.num, " — top marker features"),
-      path   = marker_plot_path(ggplot.dir, cluster.num, "feat", assay.used, filename.suffix),
+      path   = marker_plot_path(ggplot.dir, cluster.num, "feat", assay.used),
       num_cols = num_cols, base_text = base_text,
       width = fig_width, height = fig_height, dpi = dpi)
   }
@@ -501,14 +545,14 @@ feat_plots_top_genes <- function(cluster.num,
       panels = Seurat::VlnPlot(
         seurat.obj, features = genes, pt.size = vln_pt_size, combine = FALSE),
       title  = paste0("Cluster ", cluster.num, " — top marker violins"),
-      path   = marker_plot_path(ggplot.dir, cluster.num, "vln", assay.used, filename.suffix),
+      path   = marker_plot_path(ggplot.dir, cluster.num, "vln", assay.used),
       num_cols = num_cols, base_text = base_text,
       width = fig_width, height = fig_height, dpi = dpi)
   }
   
   if ("dot" %in% plots) {
     # DotPlot returns ONE ggplot covering all clusters, so no grid assembly.
-    dot.plot.path <- marker_plot_path(ggplot.dir, cluster.num, "dot", assay.used, filename.suffix)
+    dot.plot.path <- marker_plot_path(ggplot.dir, cluster.num, "dot", assay.used)
     dp <- Seurat::DotPlot(seurat.obj, features = genes, assay = assay.used) +
       ggtitle(paste0("Cluster ", cluster.num, " — top markers across all clusters")) +
       theme(axis.text.x = element_text(size = base_text, angle = 45, hjust = 1),
@@ -533,8 +577,11 @@ feat_plots_top_genes <- function(cluster.num,
 # object produced by part 2a. Stamped into obj@misc by 2a and re-checked by 2b.
 # Editing only the clustering resolution does NOT change this, so 2b can re-run
 # freely; changing a QC cutoff DOES, forcing a 2a re-run.
-upstream_params <- function(p2, run.doubletFinder, organism,
-                            part1.suffix, run.name) {
+#
+# part1_suffix / part2a_suffix are not stamped: they name the directories 2b
+# reads from, so a mismatch is impossible by construction. What this catches is
+# editing a cutoff WITHOUT changing part2a_suffix.
+upstream_params <- function(p2, run.doubletFinder, organism) {
   list(
     mito_ceiling          = p2$mito_ceiling,
     RNA_count_floor       = p2$RNA_count_floor,
@@ -544,9 +591,9 @@ upstream_params <- function(p2, run.doubletFinder, organism,
     rbc_ceiling           = p2$rbc_ceiling,
     ribo_floor            = p2$ribo_floor,
     run_doubletFinder     = isTRUE(as.logical(run.doubletFinder)),
-    organism              = organism,
-    part1_suffix          = part1.suffix %||% "",
-    run_name              = run.name %||% "default"
+    doublet_rate_per_1k   = p2$doublet_rate_per_1k %||% 0.008,
+    doublet_rate_cap      = p2$doublet_rate_cap    %||% 0.20,
+    organism              = organism
   )
 }
 
@@ -582,8 +629,9 @@ stop_if_stale <- function(obj, current.params) {
 #
 # Per resolution:
 #   * cluster the full graph once -> reference labels
-#   * repeat n_subsample times: resample subsample_frac of cells, rebuild the
-#     graph on the same reduction, re-cluster, and compare the re-clustering to
+#   * for each of n_subsample cell sets (drawn once, shared by every
+#     resolution, with the graph rebuilt on the same reduction once per set):
+#     re-cluster that set's graph, and compare the re-clustering to
 #     the reference labels RESTRICTED to those same cells, via
 #     scclusteval::PairWiseJaccardSets(); take each reference cluster's best
 #     Jaccard (row max)
@@ -613,6 +661,24 @@ select_resolution_by_stability <- function(obj,
   }
   set.seed(seed)
   all.cells <- colnames(obj)
+
+  # Draw the subsample sets ONCE, before the resolution loop, so every
+  # resolution is scored on the same cells (as chooseR does). The decision rule
+  # compares resolutions against each other; unshared draws would add noise to
+  # exactly that comparison.
+  n.sub     <- floor(length(all.cells) * subsample_frac)
+  cell.sets <- lapply(seq_len(n_subsample), function(b) sample(all.cells, n.sub))
+
+  # With the draws fixed, each draw's subset and neighbour graph no longer
+  # depend on resolution, so build them once: n_subsample FindNeighbors calls
+  # instead of n_subsample x n_resolutions. Only the SNN graph is kept (sparse);
+  # the subset objects are dropped as soon as their graph is extracted.
+  sub.graphs <- lapply(cell.sets, function(cells.b) {
+    sub <- subset(obj, cells = cells.b)
+    sub <- FindNeighbors(sub, reduction = reduction, dims = dims,
+                         graph.name = c(nn.graph.name, graph.name), verbose = FALSE)
+    sub[[graph.name]]
+  })
   
   # Percentile bootstrap CI of the median (dependency-free; chooseR uses a BCa
   # bootstrap via boot::, this is the lightweight equivalent).
@@ -640,13 +706,11 @@ select_resolution_by_stability <- function(obj,
     acc <- matrix(NA_real_, nrow = length(ref.clusters), ncol = n_subsample,
                   dimnames = list(ref.clusters, NULL))
     for (b in seq_len(n_subsample)) {
-      cells.b <- sample(all.cells, floor(length(all.cells) * subsample_frac))
-      sub <- subset(obj, cells = cells.b)
-      sub <- FindNeighbors(sub, reduction = reduction, dims = dims,
-                           graph.name = c(nn.graph.name, graph.name), verbose = FALSE)
-      sub <- FindClusters(sub, graph.name = graph.name,
-                          resolution = res, verbose = FALSE)
-      test.lab <- stats::setNames(as.character(Idents(sub)), colnames(sub))
+      # FindClusters() on a bare Graph dispatches to the default method, which
+      # the Seurat-object method wraps with the same defaults; it returns a
+      # one-column data.frame of cluster IDs, rownames = cells.
+      cl <- FindClusters(sub.graphs[[b]], resolution = res, verbose = FALSE)
+      test.lab <- stats::setNames(as.character(cl[[1]]), rownames(cl))
       
       # Compare on the SHARED cells: reference labels restricted to the subsample
       # vs the re-clustering. scclusteval returns a rows(ref) x cols(test) matrix
