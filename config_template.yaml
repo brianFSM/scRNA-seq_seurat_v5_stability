@@ -13,30 +13,30 @@ project:
 
 data:
   parent_directory_path: path/to/CellRanger
-  # Shared output root. Part 1 writes its object, QC tables, and raw QC figures
-  # here; each run's outputs go in a subdirectory named by analysis:run_name.
+  # Output root. Part 1 writes to part1[_<part1_suffix>]/ here; part 2a nests
+  # inside that, and part 2b inside 2a (see README).
   rds-file-path: ./results
 
 analysis:
   node_type: analytics
-  # Name of this run's output subdirectory under data:rds-file-path. Change it
-  # to keep alternate runs (e.g. different QC cutoffs) side by side - each run
-  # directory is self-contained and holds its own objects, tables, figures,
-  # marker genes, and PDFs. Must be a single directory name, not a path.
-  run_name: default
 
   part1:
     part1_rds_save_filename: _0_raw_seurat_object.RDS
     part1_report_tables_filename: part1_tables_for_report.RData
-    # Suffixes part 1's own output filenames, for genuine part-1 variants
-    # (e.g. SoupX on vs off). NOT for QC-cutoff variants - use run_name for
-    # those. A separator is added if you omit one ('alt' and '_alt' both work).
+    # Names this part-1 variant's directory: part1_<suffix>/. Use it when
+    # part 1 itself varies (e.g. SoupX on vs off). Leave '' for part1/.
     part1_suffix: ''
     generate_metrics_tables: 'TRUE'
     run_SoupX: 'TRUE'          # ambient RNA correction; needs the raw matrix
     ggplot_dir: ggplot
 
   part2:
+    # Names this QC/integration variant's directory: part2a_<suffix>/, nested
+    # inside the part 1 directory. Change it whenever you change a cutoff below,
+    # so alternate runs sit side by side instead of overwriting each other.
+    # Leave '' for part2a/.
+    part2a_suffix: ''
+
     ############################################################################
     # QC cutoffs - set these AFTER reading the part 1 PDF
     ############################################################################
@@ -66,13 +66,14 @@ analysis:
     # More reps = steadier estimate but more compute (reps x grid FindClusters).
     stability_reps: 5
     stability_subsample_frac: 0.8
-    # 'auto' uses the resolution part 2a proposed (recorded in the integrated
-    # object). Set a number to override; part 2a will not overwrite your value.
-    # Nothing in the pipeline writes back to this file - it is input only.
+    # 'auto' uses the resolution part 2a proposed (written to
+    # proposed_resolution.txt in the part 2a directory). Set a number to
+    # override. Part 2b writes to res_<resolution>/ either way. Nothing in the
+    # pipeline writes back to this file.
     clustering_resolution_value: auto
 
     ############################################################################
-    # Output filenames (relative to the run directory)
+    # Output filenames (relative to each stage's directory)
     ############################################################################
     merged_seurat_obj_file: _1_seurat5_obj_merged.RDS
     integrated_seurat_obj_file: _2_seurat5_obj_integrated.RDS
@@ -84,6 +85,11 @@ analysis:
     # Toggles
     ############################################################################
     run_doubletFinder: 'TRUE'  # per-sample doublet detection before merging
+    # Expected doublet rate per 1,000 cells, applied per sample (10x Chromium
+    # guidance is ~0.8%). Capped so a very large sample can't imply an
+    # implausible rate. Only used when run_doubletFinder is TRUE.
+    doublet_rate_per_1k: 0.008
+    doublet_rate_cap: 0.20
     # Which marker figures part 2b draws per cluster: any of feat, dot, vln.
     # 'vln' is off by default - the dot plot answers "is this gene
     # cluster-specific" more compactly, but violins show within-cluster
@@ -91,4 +97,3 @@ analysis:
     marker_plot_types:
       - feat
       - dot
-
