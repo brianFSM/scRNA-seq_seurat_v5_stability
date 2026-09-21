@@ -1,4 +1,4 @@
-i# functions_for_report.R
+# functions_for_report.R
 
 
 # Null-coalescing helper (rlang provides one, but keep this dependency-free).
