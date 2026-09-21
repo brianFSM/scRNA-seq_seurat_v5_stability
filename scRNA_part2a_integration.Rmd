@@ -23,7 +23,6 @@ source("functions_for_report.R") # This is the file that holds the R functions u
 ```{r libraries}
 if (!suppressMessages(require(Seurat))) stop("Seurat is required")
 if (!suppressMessages(require(yaml))) stop("yaml is required")
-if (!suppressMessages(require(cluster))) stop("cluster is required") # For silhouette score calculation
 if (!suppressMessages(require(future))) stop("future is required")
 if (!suppressMessages(require(future.apply))) stop("future.apply is required")
 if (!suppressMessages(require(cowplot))) stop("cowplot is required")
@@ -63,8 +62,7 @@ cfg.analysis <- cfg$analysis
 p1  <- cfg.analysis$part1
 p2 <- cfg.analysis$part2
 
-base.obj.loc <- cfg$data$`rds-file-path`   # shared root: part 1 artifacts
-r.obj.loc    <- run_dir(cfg)               # this run's outputs (created if absent)
+dirs <- stage_dirs(cfg, create = "part2a")   # reads part 1's dir, writes 2a's
 organism <- cfg$project$organism
 
 ################################################################################
@@ -81,6 +79,8 @@ ribo.floor = p2$ribo_floor
 
 node.type <- cfg.analysis$node_type
 run.doubletFinder <- as.logical(p2$run_doubletFinder)
+doublet.rate.per.1k <- p2$doublet_rate_per_1k %||% 0.008
+doublet.rate.cap    <- p2$doublet_rate_cap    %||% 0.20
 
 if (run.doubletFinder){ 
   if (!suppressMessages(require(DoubletFinder))) stop("DoubletFinder is required")
@@ -89,23 +89,16 @@ if (run.doubletFinder){
 ################################################################################
 # I/O paths
 ################################################################################
-part1.suffix <- p1$part1_suffix
-run.name     <- cfg.analysis$run_name %||% "default"
+# Inputs: part 1's directory.
+unfiltered.seurat.obj.path <- file.path(dirs$part1, p1$part1_rds_save_filename)
+QC.tables.path             <- file.path(dirs$part1, p1$part1_report_tables_filename)
 
-# Part 1 artifacts are shared across runs and live at the SHARED ROOT.
-unfiltered.seurat.obj.path <- suffix_path(base.obj.loc, p1$part1_rds_save_filename,      part1.suffix)
-QC.tables.path             <- suffix_path(base.obj.loc, p1$part1_report_tables_filename, part1.suffix)
-
-# Everything 2a produces belongs to THIS RUN. No filename suffixes: the run
-# directory is what keeps alternate runs apart.
-merged.seurat.obj.path     <- file.path(r.obj.loc, p2$merged_seurat_obj_file)
-integrated.seurat.obj.path <- file.path(r.obj.loc, p2$integrated_seurat_obj_file)
-part2.tables.path          <- file.path(r.obj.loc, p2$part2_report_tables_filename)
-ggplot.directory           <- file.path(r.obj.loc, p1$ggplot_dir)
-marker.gene.dir            <- file.path(r.obj.loc, p2$marker_gene_dir)
-
-for (d in c(ggplot.directory, marker.gene.dir))
-  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+# Outputs: this 2a variant's directory.
+merged.seurat.obj.path     <- file.path(dirs$part2a, p2$merged_seurat_obj_file)
+integrated.seurat.obj.path <- file.path(dirs$part2a, p2$integrated_seurat_obj_file)
+part2.tables.path          <- file.path(dirs$part2a, p2$part2_report_tables_filename)
+ggplot.directory           <- file.path(dirs$part2a, p1$ggplot_dir)
+dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
 
 
 ```
@@ -188,7 +181,7 @@ combo.table <- rbind(before.table,
 row.names(combo.table) <- c("Number of cells before filtering", "Number of cells after filtering")
 
 combo.table
-write.csv(combo.table, file.path(r.obj.loc, "filtering_stats_table.csv"), quote=FALSE)
+write.csv(combo.table, file.path(dirs$part2a, "filtering_stats_table.csv"), quote=FALSE)
 
 ```
 
@@ -214,7 +207,7 @@ save(list = to.save.for.report.p2, file = part2.tables.path)
 
 # client-facing copy, alongside filtering_stats_table.csv
 write.csv(qc.attrition.table,
-          file.path(r.obj.loc, "qc_attrition_table.csv"),
+          file.path(dirs$part2a, "qc_attrition_table.csv"),
           row.names = FALSE, quote = FALSE)
 ```
 
@@ -321,13 +314,18 @@ sample.list <- lapply(sample.list, function(obj) {
   # Homotypic adjustment using fresh clusters
   annotations    <- obj@meta.data$seurat_clusters
   homotypic.prop <- modelHomotypic(annotations)
-  nExp_poi       <- round(0.075 * nrow(obj@meta.data))
+  # Expected multiplet rate scales ~linearly with cells recovered, so each
+  # sample gets its own. Based on post-QC cell count, which slightly
+  # understates cells loaded - the same convention as the DoubletFinder docs.
+  dbl.rate       <- min(doublet.rate.per.1k * ncol(obj) / 1000, doublet.rate.cap)
+  nExp_poi       <- round(dbl.rate * ncol(obj))
   nExp_poi.adj   <- round(nExp_poi * (1 - homotypic.prop))
 
   sample.name <- unique(obj$sample_id)
 
-  cat(sample.name, " nCells:", ncol(obj), "| pK:", pk.val,
-      "| nExp:", nExp_poi, "| nExp.adj:", nExp_poi.adj, "\n")
+  cat(sample.name, " nCells:", ncol(obj),
+      "| rate:", sprintf("%.1f%%", 100 * dbl.rate),
+      "| pK:", pk.val, "| nExp:", nExp_poi, "| nExp.adj:", nExp_poi.adj, "\n")
 
   # DoubletFinder - run 1 (unadjusted)
   obj      <- doubletFinder(obj, PCs = 1:10, pN = 0.25, pK = pk.val,
@@ -359,7 +357,11 @@ print(paste0("Saved merged object to ", merged.seurat.obj.path))
 ```
 
 ```{r doubletFinderMsg, eval=run.doubletFinder, results='asis'}
-cat("## Doublet Detection\n\nDoubletFinder was run on each sample individually prior to merging.\n")
+cat("## Doublet Detection\n\nDoubletFinder was run on each sample individually prior to merging. ",
+    "The expected doublet rate was set per sample at ",
+    sprintf("%.1f%%", 100 * doublet.rate.per.1k), " per 1,000 cells ",
+    "(capped at ", sprintf("%.0f%%", 100 * doublet.rate.cap), "), then reduced ",
+    "by the estimated homotypic proportion.\n", sep = "")
 ```
 
 SCTransform, PCA and UMAP generation
@@ -411,8 +413,23 @@ options(future.globals.maxSize = +Inf)
 # seurat5.obj <- readRDS(merged.seurat.obj.path)
 
 # --- START cell num check ---
-# Calculate the minimum number of cells in any layer/sample
-min.cells <- min(table(seurat5.obj$sample_id))
+# Cells per sample AFTER QC and doublet removal. table() on a factor keeps
+# levels with zero cells, so drop and report those rather than letting a 0
+# reach k.weight.
+tab.all <- table(seurat5.obj$sample_id)
+emptied <- names(tab.all)[tab.all == 0]
+if (length(emptied)) {
+  msg <- paste0("Sample(s) with no cells left after QC/doublet removal, ",
+                "excluded from integration: ", paste(emptied, collapse = ", "))
+  warning(msg); cat("\n**", msg, "**\n\n", sep = "")
+}
+cells.per.sample <- tab.all[tab.all > 0]
+min.cells <- min(cells.per.sample)
+
+if (min.cells < 30)
+  stop("Smallest remaining sample (", names(which.min(cells.per.sample)),
+       ") has only ", min.cells, " cells - too few to integrate. Relax the QC ",
+       "cutoffs, or remove the sample from project:samples.")
 
 # Set k.weight to the minimum of 100 (default) or 70% of the smallest sample size
 # assuming a worst-case where only 70% of the cells end up acting as anchors
@@ -465,13 +482,39 @@ seurat5.obj.integrated <- RunUMAP(
 seurat5.obj.integrated@misc$upstream_params <- upstream_params(
   p2                = p2,
   run.doubletFinder = run.doubletFinder,
-  organism          = organism,
-  part1.suffix      = part1.suffix,
-  run.name          = run.name
+  organism          = organism
 )
 
 saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
 print(paste0("Saved integrated object (with int_snn graph) to ", integrated.seurat.obj.path))
+```
+
+## UMAP after integration, colored by sample
+
+```{r integrated_umap_by_sample}
+integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated,
+                                        pt.size = 0.001,
+                                        reduction = "umap.postint",
+                                        shuffle = TRUE,
+                                        group.by = "sample_id")
+
+
+# If you want to see this plot faceted by sample, i.e. one plot per sample, 
+# uncomment this code:
+
+# integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated, 
+#                                         pt.size = 0.001, 
+#                                         reduction = "umap.postint", 
+#                                         group.by = "sample_id", 
+#                                         split.by = "sample_id", 
+#                                         ncol = 2) + NoLegend()
+
+
+save_png_plot(integrated.dimplot.by.sample, 
+              plot_path(ggplot.directory, "integrated_umap_by_sample.png"))
+              
+integrated.dimplot.by.sample
+
 ```
 
 
@@ -482,13 +525,15 @@ integrated.reduction.label <- "integrated.rpca"
 
 
 ```
+
 # Clustering resolution recommendation
 
 Part 2a does **not** commit to a final clustering. It scores a grid of
 resolutions for *subsample stability* — how reproducibly each resolution
 recovers the same clusters when a fraction of cells is resampled — and writes a
-**proposed** resolution to the config. Part 2b reads that value (or your manual
-override) and does the actual clustering + marker discovery.
+**proposed** resolution to `proposed_resolution.txt` in this run's part 2a
+directory. Part 2b reads that value (or your manual override in the config) and
+does the actual clustering + marker discovery.
 
 Stability is chosen over silhouette because silhouette systematically rewards
 coarse partitions; stability instead answers the question we actually care about
@@ -588,24 +633,28 @@ clustree.plot
 
 
 ```{r stamp_proposed_resolution}
-# 2a PROPOSES; it does not write to config.yaml. The proposal rides along in
-# the object, so config.yaml stays a pure input and a hand-set
-# clustering_resolution_value is never clobbered by re-running 2a.
+# 2a PROPOSES; it does not write to config.yaml. The proposal goes to
+# proposed_resolution.txt in this 2a directory, which is what 'auto' reads
+# (see resolve_resolution()), so config.yaml stays a pure input and a hand-set
+# clustering_resolution_value is never clobbered by re-running 2a. The @misc
+# copy is kept as a record on the object only.
 #
 # Second save: the first (above) happens before the sweep, so a sweep failure
 # still leaves a usable integrated object. This one adds the proposal - and,
 # if clustree ran, the int_snn_res.* columns it computed.
 seurat5.obj.integrated@misc$proposed_resolution <- proposed.res
+write_proposed_resolution(dirs$part2a, proposed.res)
 saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
 
 cat("Proposed resolution:", proposed.res, "\n")
-cat("Part 2b will use this unless clustering_resolution_value is set to a",
-    "number in the config (currently:",
-    as.character(p2$clustering_resolution_value %||% "auto"), ").\n")
+cat("Part 2b will write to res_", format_res(proposed.res), "/ unless ",
+    "clustering_resolution_value is set to a number in the config (currently: ",
+    as.character(p2$clustering_resolution_value %||% "auto"), ").\n", sep = "")
 ```
 
 ## Session Information
 ```{r session_info_2a}
 sessionInfo()
 ```
+
 
