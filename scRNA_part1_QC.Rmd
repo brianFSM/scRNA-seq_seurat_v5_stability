@@ -34,7 +34,6 @@ if (!suppressMessages(require(knitr))) stop("knitr is required")
 if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
 if (!suppressMessages(require(dplyr))) stop("dplyr is required")
 if (!suppressMessages(require(scales))) stop("scales is required")
-if (!suppressMessages(require(SoupX))) stop("SoupX is required")
 
 ```
 
@@ -60,65 +59,41 @@ project.description <- config.args$project$`project-description`
 dataset.path <- config.args$data$parent_directory_path
 organism = config.args$project$organism
 run.soupx <- as.logical(config.args$analysis$part1$run_SoupX)
+if (run.soupx && !suppressMessages(require(SoupX)))
+  stop("SoupX is required when run_SoupX is TRUE")
 
 ################################################################################
-# Set output directory paths
+# Output paths. Part 1 writes into part1[_<part1_suffix>]/; later stages nest
+# inside it. See stage_dirs() in functions_for_report.R.
 ################################################################################
+dirs  <- stage_dirs(config.args, create = "part1")
+p1    <- config.args$analysis$part1
 
-# Shared output root. Part 1's object, QC tables, and raw QC figures are
-# cutoff-independent, so they live here rather than inside a run directory.
-# Parts 2a/2b/3 write to <rds-file-path>/<run_name> instead - see run_dir().
-r.obj.loc <- config.args$data$`rds-file-path`
-
-# part1_suffix keeps genuine part-1 variants apart (e.g. SoupX on vs off).
-# It is NOT the knob for QC-cutoff variants; those get their own run_name.
-part1.suffix <- config.args$analysis$part1$part1_suffix
-
-unfiltered.seurat.obj.path <- suffix_path(
-  r.obj.loc, config.args$analysis$part1$part1_rds_save_filename, part1.suffix)
-QC.tables.path <- suffix_path(
-  r.obj.loc, config.args$analysis$part1$part1_report_tables_filename, part1.suffix)
-
-ggplot.directory.name <- config.args$analysis$part1$ggplot_dir
-ggplot.directory <- file.path(r.obj.loc, ggplot.directory.name)
-
-# create ggplot folder if it doesn't exist already
-if (!file.exists(ggplot.directory)) {
- dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
-}
-
-# create rds folder if it doesn't exist already
-if (!file.exists(r.obj.loc)) {
-
- dir.create(r.obj.loc, showWarnings = FALSE, recursive = TRUE)
-
-}
-
+unfiltered.seurat.obj.path <- file.path(dirs$part1, p1$part1_rds_save_filename)
+QC.tables.path             <- file.path(dirs$part1, p1$part1_report_tables_filename)
+ggplot.directory           <- file.path(dirs$part1, p1$ggplot_dir)
+dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
 
 
 ################################################################################
 # Set gene subset markers (mito genes, ribo genes, etc)
 ################################################################################
 
-if (organism == "human"){
-  mt.marker = "^MT-"
-  hb.marker = "^HB[^(P)]"
-  ribo.marker = "^RP[SL]"
-  xist.gene = "XIST"
-  y.genes <- readLines("y_genes_hg38_symbols.txt")
-  genes.file = "/projects/b1012/xvault/REFERENCES/10xGenomics/RNA-seq/hg38/refdata-gex-GRCh38-2020-A/genes/genes.gtf"
-} else if (organism == "mouse") {
-  mt.marker = "^mt-"
-  hb.marker = "^Hb[^(p)]"
-  ribo.marker = "^Rp[sl]"
-  y.genes <- readLines("y_genes_mm10_symbols.txt")
-  genes.file = "/projects/b1012/xvault/REFERENCES/10xGenomics/RNA-seq/mm10/refdata-gex-mm10-2020-A/genes/genes.gtf"
-  xist.gene = "Xist"
+organism <- tolower(organism)
+if (!organism %in% c("human", "mouse"))
+  stop("project:organism must be 'human' or 'mouse', got: '", organism, "'. ",
+       "Other species need their own mito/ribo/hb patterns and Y-gene list.")
+
+if (organism == "human") {
+  mt.marker   <- "^MT-"
+  hb.marker   <- "^HB[^(P)]"
+  ribo.marker <- "^RP[SL]"
+  y.genes     <- readLines("y_genes_hg38_symbols.txt")
 } else {
-  mt.marker = "NONE"
-  hb.marker = "NONE"
-  ribo.marker = "NONE"
-  xist.gene = "NONE"
+  mt.marker   <- "^mt-"
+  hb.marker   <- "^Hb[^(p)]"
+  ribo.marker <- "^Rp[sl]"
+  y.genes     <- readLines("y_genes_mm10_symbols.txt")
 }
 
 
@@ -352,4 +327,5 @@ saveRDS(seurat.obj.v5, unfiltered.seurat.obj.path)
 ```{r sessioninfo, eval=TRUE}
 sessionInfo()
 ```
+
 
