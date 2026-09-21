@@ -79,6 +79,8 @@ only:
 install.packages("tinytex")
 tinytex::install_tinytex()   # sets up ~/.TinyTeX
 tinytex::is_tinytex()        # should return TRUE
+
+tinytex::reinstall_tinytex() # If running on a new version of R
 ```
 
 **4. Two packages worth confirming are present.** If `renv::restore()` didn't
