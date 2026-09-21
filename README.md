@@ -45,7 +45,7 @@ Or from the command line:
 git clone https://github.com/brianFSM/scRNA-seq_seurat_V5.git
 cd scRNA-seq_seurat_V5
 module purge all
-module load R/4.4.0
+module load R/4.5.1
 ```
 
 **2. Restore the environment**
@@ -56,6 +56,17 @@ project directory:
 ```r
 renv::init(bare = TRUE)
 renv::restore()
+```
+
+Upon initially running this repo (either for your first time ever or if you're working in a different R version)
+you will have to install some of these packages "by hand" on quest.
+
+```r
+renv::install("immunogenomics/presto")
+renv.install("remotes")
+remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = TRUE)
+remotes::install_github("crazyhottommy/scclusteval")
+
 ```
 
 Packages symlink from the `renv` cache if you've built them before; otherwise
@@ -75,7 +86,7 @@ bring them (GitHub-only or optional), install and re-snapshot:
 
 ```r
 # REQUIRED by part 2a: subsample-stability resolution selection
-renv::install("crazyhottommy/scclusteval")
+remotes::install_github("crazyhottommy/scclusteval")
 
 # OPTIONAL: clustree override plot in part 2a (chunk auto-skips if absent)
 renv::install("clustree")
@@ -89,12 +100,6 @@ devtools::install_github("immunogenomics/presto")
 
 renv::snapshot()
 ```
-
-> **Note for QDSC:** if you want the exact shared lockfile the core standardizes
-> on, copy it in *before* `renv::restore()`
-> (`cp /projects/b1197/.../renv.lock .`). This is optional and only works if you
-> have access to that project space — the repo's own `renv.lock` is sufficient
-> for anyone else.
 
 ---
 

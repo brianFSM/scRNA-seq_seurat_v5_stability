@@ -95,6 +95,9 @@ unfiltered.seurat.obj.path <- file.path(r.obj.loc, unfiltered.seurat.obj.file)
 QC.tables.file <- p1$part1_report_tables_filename
 QC.tables.file <-sub(".RData", paste0(part1.suffix, ".RData"), QC.tables.file)
 QC.tables.path <-file.path(r.obj.loc, QC.tables.file)
+
+
+part2.suffix <- p1$part1_suffix
 part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, part2.suffix)
 
 

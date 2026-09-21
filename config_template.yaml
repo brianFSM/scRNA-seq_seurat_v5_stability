@@ -2,63 +2,93 @@ project:
   analyst-name: Your Name
   project-name: 'Test'
   project-description: "ToDo"
-  organism: mouse
-  run_cell_cycle: 'TRUE'
-  # Samples are now a proper YAML sequence. Dashes/quotes are no longer needed;
+  organism: mouse            # 'mouse' or 'human' - sets mito/ribo/hb/Y gene patterns
+  # Samples are a proper YAML sequence. Dashes/quotes are not needed;
   # names with spaces or dashes are handled correctly.
   samples:
     - Sample1
     - Sample2
     - Sample3
     - Sample4
+
 data:
   parent_directory_path: path/to/CellRanger
-  rds-file-path: path/to/results
+  # Shared output root. Part 1 writes its object, QC tables, and raw QC figures
+  # here; each run's outputs go in a subdirectory named by analysis:run_name.
+  rds-file-path: ./results
+
 analysis:
-  run_tests: no
   node_type: analytics
+  # Name of this run's output subdirectory under data:rds-file-path. Change it
+  # to keep alternate runs (e.g. different QC cutoffs) side by side - each run
+  # directory is self-contained and holds its own objects, tables, figures,
+  # marker genes, and PDFs. Must be a single directory name, not a path.
+  run_name: default
+
   part1:
     part1_rds_save_filename: _0_raw_seurat_object.RDS
     part1_report_tables_filename: part1_tables_for_report.RData
+    # Suffixes part 1's own output filenames, for genuine part-1 variants
+    # (e.g. SoupX on vs off). NOT for QC-cutoff variants - use run_name for
+    # those. A separator is added if you omit one ('alt' and '_alt' both work).
     part1_suffix: ''
     generate_metrics_tables: 'TRUE'
-    run_SoupX: 'TRUE'
+    run_SoupX: 'TRUE'          # ambient RNA correction; needs the raw matrix
     ggplot_dir: ggplot
+
   part2:
-    mito_ceiling: 5
+    ############################################################################
+    # QC cutoffs - set these AFTER reading the part 1 PDF
+    ############################################################################
+    mito_ceiling: 5            # max % mitochondrial
     RNA_count_floor: 500
     RNA_count_ceiling: 25000
     feature_count_floor: 300
     feature_count_ceiling: 6000
-    rbc_ceiling: 100
+    rbc_ceiling: 100           # max % hemoglobin
     # ribo_floor filters out cells BELOW this percent ribosomal content.
     # This is non-standard and can remove legitimate low-ribo cell types, so it
     # defaults to 0 (off). Raise it only if you have a specific reason to.
     ribo_floor: 0
-    # Clustering resolution sweep. Silhouette maximization tends to favor coarse
-    # (fewer, larger) clusters, so a broad, standard Louvain range is used by
-    # default. Narrow or shift this to match expected biological granularity.
+
+    ############################################################################
+    # Clustering resolution
+    ############################################################################
+    # Resolution grid swept for subsample stability. A broad, standard Louvain
+    # range by default; narrow or shift it to match expected biological
+    # granularity.
     cluster_res_min: 0.1
     cluster_res_max: 1.0
     cluster_res_step: 0.1
-    # Part 2a scores each resolution in the grid above for subsample stability
-    # (how reproducibly it recovers the same clusters under resampling) and
-    # proposes the finest resolution that stays at/above stability_threshold.
+    # Part 2a scores each resolution in the grid for subsample stability (how
+    # reproducibly it recovers the same clusters under resampling), then picks
+    # the finest resolution clearing a threshold derived from the data itself.
     # More reps = steadier estimate but more compute (reps x grid FindClusters).
     stability_reps: 5
     stability_subsample_frac: 0.8
-    stability_threshold: 0.75
-    # to change your clustering, only ever touch clustering_resolution_value. Editing 
-    # clustering_resolution (lower down in the config) by hand does nothing useful because
-    # 2b recomputes it from the value and overwrites whatever you typed
-    clustering_resolution_value: None
-    part2_rds_open_filename: _0_raw_seurat_object.RDS
+    # 'auto' uses the resolution part 2a proposed (recorded in the integrated
+    # object). Set a number to override; part 2a will not overwrite your value.
+    # Nothing in the pipeline writes back to this file - it is input only.
+    clustering_resolution_value: auto
+
+    ############################################################################
+    # Output filenames (relative to the run directory)
+    ############################################################################
     merged_seurat_obj_file: _1_seurat5_obj_merged.RDS
     integrated_seurat_obj_file: _2_seurat5_obj_integrated.RDS
     clustered_seurat_obj_file: _3_seurat5_obj_clustered.RDS
     part2_report_tables_filename: part2_tables_for_report.RData
     marker_gene_dir: marker_genes
-    run_doubletFinder: 'TRUE'
-    part2_suffix: ''
-    clustering_resolution: None
-    num_clusters: 0
+
+    ############################################################################
+    # Toggles
+    ############################################################################
+    run_doubletFinder: 'TRUE'  # per-sample doublet detection before merging
+    # Which marker figures part 2b draws per cluster: any of feat, dot, vln.
+    # 'vln' is off by default - the dot plot answers "is this gene
+    # cluster-specific" more compactly, but violins show within-cluster
+    # distribution, so add it when you need to see bimodality.
+    marker_plot_types:
+      - feat
+      - dot
+

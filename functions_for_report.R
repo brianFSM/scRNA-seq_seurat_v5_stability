@@ -1,15 +1,26 @@
 # functions_for_report.R
 
 
-# Helper function that formats filenames. Allows for adding
-# suffix to config for alternate versions of analysis (e.g. 
-# different clustering resolutions, filters, etc)
-suffix_path <- function(base_dir, filename, suffix = "") { 
+# Null-coalescing helper (rlang provides one, but keep this dependency-free).
+# Defined first because run_dir() and upstream_params() both use it.
+`%||%` <- function(a, b) if (is.null(a)) b else a
 
-	root <- tools::file_path_sans_ext(filename) 
-	ext  <- tools::file_ext(filename) 
-	fn   <- if (nzchar(suffix)) paste0(root, suffix, if (nzchar(ext)) paste0(".", ext) else "") else filename 
-	file.path(base_dir, fn)
+
+# Resolve this run's output directory: <rds-file-path>/<run_name>.
+#
+# Part 1 writes to the shared root (its object is cutoff-independent, so
+# re-running it per QC variant is wasted work); parts 2a/2b/3 write here.
+# Creating the directory is idempotent, so every report can just call this.
+run_dir <- function(cfg, create = TRUE) {
+  base <- cfg$data$`rds-file-path`
+  if (is.null(base) || !nzchar(base))
+    stop("data:rds-file-path is not set in the config.")
+  run <- cfg$analysis$run_name %||% "default"
+  if (grepl("[/\\\\]", run))
+    stop("analysis:run_name must be a single directory name, not a path. Got: ", run)
+  d <- file.path(base, run)
+  if (create) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  d
 }
 
 # Helper function to make the sample names pretty and workable.
@@ -19,9 +30,9 @@ suffix_path <- function(base_dir, filename, suffix = "") {
 # (a single dash/quote-delimited string) is still handled for back-compat, so
 # old config files don't break.
 sanitize_sample_names <- function(formatted.samples){
-
+  
   ids <- unlist(formatted.samples, use.names = FALSE)
-
+  
   # Legacy single-string format, e.g.  -"Sample1" -"Sample2"
   if (length(ids) == 1 && grepl("[[:space:]\"]|^-", ids)) {
     ids <- sub("^-", "", ids)          # strip only the leading formatting dash
@@ -29,13 +40,13 @@ sanitize_sample_names <- function(formatted.samples){
     ids <- gsub("\"", "", ids)         # drop quotes
     ids <- unlist(strsplit(ids, "[[:space:]]+"))
   }
-
+  
   # Common cleanup for both paths: trim whitespace, drop quotes/empties.
   ids <- trimws(gsub("\"", "", ids))
   ids <- ids[nzchar(ids)]
-
+  
   if (length(ids) == 0) stop("No sample names could be parsed from the config 'samples' entry.")
-
+  
   ids
 }
 
@@ -46,135 +57,135 @@ sanitize_sample_names <- function(formatted.samples){
 save_png_plot <- function(p, path, width = 7, height = 5, dpi = 150) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   out <- path
-	
-	# works for ggplot or any grid grob via cowplot::ggdraw 
-	if (inherits(p, "ggplot")) { 
-		ggplot2::ggsave(out, plot = p, width = width, height = height, 
-				units = "in", dpi = dpi, limitsize = TRUE) 
-	} else if (!is.null(p$gtable)) { # pheatmap object 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		grid::grid.newpage(); grid::grid.draw(p$gtable); dev.off() 
-	} else if (inherits(p, "grob") || inherits(p, "gTree")) { 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		grid::grid.newpage(); grid::grid.draw(p); dev.off() 
-	} else { 
-		# last resort: try plotting it 
-		png(out, width = width, height = height, units = "in", res = dpi) 
-		print(p); dev.off() 
-	} 
-	invisible(out) 
+  
+  # works for ggplot or any grid grob via cowplot::ggdraw 
+  if (inherits(p, "ggplot")) { 
+    ggplot2::ggsave(out, plot = p, width = width, height = height, 
+                    units = "in", dpi = dpi, limitsize = TRUE) 
+  } else if (!is.null(p$gtable)) { # pheatmap object 
+    png(out, width = width, height = height, units = "in", res = dpi) 
+    grid::grid.newpage(); grid::grid.draw(p$gtable); dev.off() 
+  } else if (inherits(p, "grob") || inherits(p, "gTree")) { 
+    png(out, width = width, height = height, units = "in", res = dpi) 
+    grid::grid.newpage(); grid::grid.draw(p); dev.off() 
+  } else { 
+    # last resort: try plotting it 
+    png(out, width = width, height = height, units = "in", res = dpi) 
+    print(p); dev.off() 
+  } 
+  invisible(out) 
 }
 
 
 # Filter out the metrics we don't want, and format everything nicely
 make_qc_table <- function(ids, dataset.path){
   
-	d10x.metrics <- lapply(ids, function(sample.name){ 
-				       metrics.path.cleaned <- file.path(dataset.path, sample.name, "metrics_summary.csv") 
-				       metrics.path.raw     <- file.path(dataset.path, sample.name, "outs/metrics_summary.csv") 
-				       tryCatch({ 
-					       if (file.exists(metrics.path.cleaned)) { 
-						       read.csv(metrics.path.cleaned, colClasses = "character") 
-					       } else if (file.exists(metrics.path.raw)) { 
-						       read.csv(metrics.path.raw, colClasses = "character") 
-					       } else { 
-						       data.frame() 
-					       } 
-				       }, error = function(cond){ 
-					       message(paste0("Error loading the sample ", sample.name, ": ", conditionMessage(cond))) 
-					       data.frame() 
-				       }) 
-				})
-
-	# --- Make them a data.frame, keyed by sample --- 
-	# Bind on a Sample column rather than rownames: rownames(df) <- ids throws
-	# when a sample's metrics_summary.csv is missing (empty data.frame) or when
-	# column sets differ between samples. Tag each frame with its sample first,
-	# then bind by name so mismatched/absent samples degrade gracefully.
-	names(d10x.metrics) <- ids
-	d10x.metrics <- Filter(function(x) nrow(x) > 0, d10x.metrics)
-	if (length(d10x.metrics) == 0) {
-		warning("No metrics_summary.csv files could be read for any sample; returning empty QC table.")
-		return(data.frame(metric = character(0)))
-	}
-	dropped <- setdiff(ids, names(d10x.metrics))
-	if (length(dropped) > 0) {
-		message("No metrics_summary.csv found for: ", paste(dropped, collapse = ", "),
-			" — these samples are omitted from the QC metrics table.")
-	}
-	for (s in names(d10x.metrics)) d10x.metrics[[s]]$.sample <- s
-	df <- dplyr::bind_rows(d10x.metrics)   # tolerant of differing columns
-	rownames(df) <- df$.sample
-	df$.sample <- NULL
-
-	# --- Keep only desired metrics (only those actually present) --- 
-	keep <- c("Estimated.Number.of.Cells", 
-		  "Mean.Reads.per.Cell", 
-		  "Median.Genes.per.Cell", 
-		  "Valid.Barcodes") 
-	keep_present <- intersect(keep, colnames(df))
-	missing_cols <- setdiff(keep, colnames(df))
-	if (length(missing_cols) > 0) {
-		message("QC metrics not found in metrics_summary.csv (CellRanger version drift?): ",
-			paste(missing_cols, collapse = ", "))
-	}
-	if (length(keep_present) == 0) {
-		warning("None of the expected QC metric columns were found; returning empty QC table.")
-		return(data.frame(metric = character(0)))
-	}
-	df_sub <- df[, keep_present, drop = FALSE] 
-	
-	# --- Prettify metric names --- 
-	pretty_names <- function(x) { 
-		s <- gsub("\\.", " ", x) 
-		s <- tolower(s) 
-		substr(s, 1, 1) <- toupper(substr(s, 1, 1)) 
-		s 
-	} 
-	colnames(df_sub) <- pretty_names(colnames(df_sub))
+  d10x.metrics <- lapply(ids, function(sample.name){ 
+    metrics.path.cleaned <- file.path(dataset.path, sample.name, "metrics_summary.csv") 
+    metrics.path.raw     <- file.path(dataset.path, sample.name, "outs/metrics_summary.csv") 
+    tryCatch({ 
+      if (file.exists(metrics.path.cleaned)) { 
+        read.csv(metrics.path.cleaned, colClasses = "character") 
+      } else if (file.exists(metrics.path.raw)) { 
+        read.csv(metrics.path.raw, colClasses = "character") 
+      } else { 
+        data.frame() 
+      } 
+    }, error = function(cond){ 
+      message(paste0("Error loading the sample ", sample.name, ": ", conditionMessage(cond))) 
+      data.frame() 
+    }) 
+  })
   
- 
-	# --- Transpose; put 'metric' first --- 
-	qc.table <- t(df_sub) 
-	qc.table <- as.data.frame(qc.table, stringsAsFactors = FALSE) 
-	qc.table$metric <- rownames(qc.table) 
-	row.names(qc.table) <- NULL 
-	qc.table <- qc.table[, c(ncol(qc.table), 1:(ncol(qc.table)-1))]
+  # --- Make them a data.frame, keyed by sample --- 
+  # Bind on a Sample column rather than rownames: rownames(df) <- ids throws
+  # when a sample's metrics_summary.csv is missing (empty data.frame) or when
+  # column sets differ between samples. Tag each frame with its sample first,
+  # then bind by name so mismatched/absent samples degrade gracefully.
+  names(d10x.metrics) <- ids
+  d10x.metrics <- Filter(function(x) nrow(x) > 0, d10x.metrics)
+  if (length(d10x.metrics) == 0) {
+    warning("No metrics_summary.csv files could be read for any sample; returning empty QC table.")
+    return(data.frame(metric = character(0)))
+  }
+  dropped <- setdiff(ids, names(d10x.metrics))
+  if (length(dropped) > 0) {
+    message("No metrics_summary.csv found for: ", paste(dropped, collapse = ", "),
+            " — these samples are omitted from the QC metrics table.")
+  }
+  for (s in names(d10x.metrics)) d10x.metrics[[s]]$.sample <- s
+  df <- dplyr::bind_rows(d10x.metrics)   # tolerant of differing columns
+  rownames(df) <- df$.sample
+  df$.sample <- NULL
   
-  	# --- Order metrics (optional) --- 
-	metric_order <- c("Estimated number of cells", 
-			  "Mean reads per cell", 
-			  "Median genes per cell", 
-			  "Valid barcodes") 
-	qc.table <- qc.table %>% 
-		mutate(metric = factor(metric, levels = metric_order)) %>% 
-		arrange(metric) %>% 
-		mutate(metric = as.character(metric))
-	# return 
-	qc.table
+  # --- Keep only desired metrics (only those actually present) --- 
+  keep <- c("Estimated.Number.of.Cells", 
+            "Mean.Reads.per.Cell", 
+            "Median.Genes.per.Cell", 
+            "Valid.Barcodes") 
+  keep_present <- intersect(keep, colnames(df))
+  missing_cols <- setdiff(keep, colnames(df))
+  if (length(missing_cols) > 0) {
+    message("QC metrics not found in metrics_summary.csv (CellRanger version drift?): ",
+            paste(missing_cols, collapse = ", "))
+  }
+  if (length(keep_present) == 0) {
+    warning("None of the expected QC metric columns were found; returning empty QC table.")
+    return(data.frame(metric = character(0)))
+  }
+  df_sub <- df[, keep_present, drop = FALSE] 
+  
+  # --- Prettify metric names --- 
+  pretty_names <- function(x) { 
+    s <- gsub("\\.", " ", x) 
+    s <- tolower(s) 
+    substr(s, 1, 1) <- toupper(substr(s, 1, 1)) 
+    s 
+  } 
+  colnames(df_sub) <- pretty_names(colnames(df_sub))
+  
+  
+  # --- Transpose; put 'metric' first --- 
+  qc.table <- t(df_sub) 
+  qc.table <- as.data.frame(qc.table, stringsAsFactors = FALSE) 
+  qc.table$metric <- rownames(qc.table) 
+  row.names(qc.table) <- NULL 
+  qc.table <- qc.table[, c(ncol(qc.table), 1:(ncol(qc.table)-1))]
+  
+  # --- Order metrics (optional) --- 
+  metric_order <- c("Estimated number of cells", 
+                    "Mean reads per cell", 
+                    "Median genes per cell", 
+                    "Valid barcodes") 
+  qc.table <- qc.table %>% 
+    mutate(metric = factor(metric, levels = metric_order)) %>% 
+    arrange(metric) %>% 
+    mutate(metric = as.character(metric))
+  # return 
+  qc.table
 }
 
 
 # This is mostly used for putting the sample names in the right order so things 
 # are consistent in the plots
 make_metric_table_from_list <- function(seurat.list, 
-					metric, 
-					sample_levels = NULL, 
-					sort_alpha = TRUE) { 
-	df <- do.call(rbind, lapply(names(seurat.list), function(s) { 
-					    so <- seurat.list[[s]] 
-					    stopifnot(metric %in% colnames(so[[]])) 
-					    data.frame(Sample = s, value = so[[metric, drop = TRUE]], 
-						       row.names = colnames(so), check.names = FALSE) 
-				       })) 
-	names(df)[2] <- metric 
-
-	if (!is.null(sample_levels)) { 
-		df$Sample <- factor(df$Sample, levels = sample_levels) 
-	} else if (sort_alpha) { 
-		df$Sample <- factor(df$Sample, levels = sort(unique(df$Sample))) 
-	} else { 
-		df$Sample <- factor(df$Sample, levels = unique(df$Sample))
+                                        metric, 
+                                        sample_levels = NULL, 
+                                        sort_alpha = TRUE) { 
+  df <- do.call(rbind, lapply(names(seurat.list), function(s) { 
+    so <- seurat.list[[s]] 
+    stopifnot(metric %in% colnames(so[[]])) 
+    data.frame(Sample = s, value = so[[metric, drop = TRUE]], 
+               row.names = colnames(so), check.names = FALSE) 
+  })) 
+  names(df)[2] <- metric 
+  
+  if (!is.null(sample_levels)) { 
+    df$Sample <- factor(df$Sample, levels = sample_levels) 
+  } else if (sort_alpha) { 
+    df$Sample <- factor(df$Sample, levels = sort(unique(df$Sample))) 
+  } else { 
+    df$Sample <- factor(df$Sample, levels = unique(df$Sample))
   }
   
   df
@@ -190,7 +201,7 @@ make_metric_table <- function(obj, sample_col, metric, sample_levels = NULL, sor
     check.names = FALSE
   )
   names(out)[2] <- metric
-
+  
   if (!is.null(sample_levels)) {
     out$Sample <- factor(as.character(out$Sample), levels = sample_levels)
   } else if (sort_alpha) {
@@ -320,7 +331,15 @@ read_10x_any <- function(sample.name, dataset.path, run.soupx, type = "auto") {
     tmp <- FindClusters(tmp, resolution = 0.3,         verbose = FALSE)
     sc  <- setClusters(sc, setNames(tmp$seurat_clusters, colnames(tmp)))
     
+    # autoEstCont() draws its diagnostic plot as a side effect and returns an
+    # untitled base-R plot, so label it here - otherwise the report shows N
+    # identical-looking panels with no way to tell which sample is which.
     sc  <- autoEstCont(sc, verbose = FALSE)
+    title(main = paste0("SoupX contamination estimate: ", sample.name))
+    
+    rho <- tryCatch(sc$metaData$rho[1], error = function(e) NA_real_)
+    message("SoupX rho for ", sample.name, ": ", signif(rho, 3))
+    
     return(adjustCounts(sc, roundToInt = TRUE))
   }
   
@@ -333,7 +352,7 @@ vln_boxplot <- function(data, x, y, title) {
     geom_boxplot(width = 0.1) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
     ggtitle(title)
-
+  
   p
 }
 
@@ -375,6 +394,9 @@ plot_path <- function(ggplot.dir, filename, filename.suffix = "") {
   file.path(ggplot.dir, with_suffix(filename, filename.suffix))
 }
 
+# Full path to a suffixed file in a directory. Used for part 1 artifacts,
+# which carry part1_suffix; part 2 outputs are separated by run directory
+# instead and pass no suffix.
 suffix_path <- function(base_dir, filename, suffix = "") {
   file.path(base_dir, with_suffix(filename, suffix))
 }
@@ -426,8 +448,12 @@ save_panel_grid <- function(panels, title, path, num_cols, base_text,
 feat_plots_top_genes <- function(cluster.num,
                                  seurat.obj,
                                  marker.genes.df,
-                                 filename.suffix,
                                  ggplot.dir,
+                                 # Defaults to "" like plot_path() and
+                                 # marker_plot_path(). Runs are separated by
+                                 # output directory, not by filename suffix, so
+                                 # callers normally omit this.
+                                 filename.suffix = "",
                                  plots = c("feat", "dot"),
                                  assay.used = "SCT",
                                  genes_per_page = 6,
@@ -498,7 +524,7 @@ feat_plots_top_genes <- function(cluster.num,
 }
 
 
-  
+
 ################################################################################
 # Part 2a / 2b split: handoff staleness + stability-based resolution selection
 ################################################################################
@@ -508,7 +534,7 @@ feat_plots_top_genes <- function(cluster.num,
 # Editing only the clustering resolution does NOT change this, so 2b can re-run
 # freely; changing a QC cutoff DOES, forcing a 2a re-run.
 upstream_params <- function(p2, run.doubletFinder, organism,
-                            part1.suffix, part2.suffix) {
+                            part1.suffix, run.name) {
   list(
     mito_ceiling          = p2$mito_ceiling,
     RNA_count_floor       = p2$RNA_count_floor,
@@ -520,12 +546,10 @@ upstream_params <- function(p2, run.doubletFinder, organism,
     run_doubletFinder     = isTRUE(as.logical(run.doubletFinder)),
     organism              = organism,
     part1_suffix          = part1.suffix %||% "",
-    part2_suffix          = part2.suffix %||% ""
+    run_name              = run.name %||% "default"
   )
 }
 
-# Null-coalescing helper (rlang provides one, but keep this dependency-free).
-`%||%` <- function(a, b) if (is.null(a)) b else a
 
 # Compare the stamped upstream params to the current config; stop on mismatch.
 stop_if_stale <- function(obj, current.params) {
@@ -573,23 +597,23 @@ stop_if_stale <- function(obj, current.params) {
 # Returns list(summary = data.frame(resolution, n_clusters, median, low, high),
 #              threshold = <numeric>, chosen_resolution = <numeric>).
 select_resolution_by_stability <- function(obj,
-                                            resolutions,
-                                            graph.name = "int_snn", 
-					    nn.graph.name = "int_nn", 
-                                            reduction  = "integrated.rpca",
-                                            dims       = 1:30,
-                                            n_subsample = 5,
-                                            subsample_frac = 0.8,
-                                            boot_reps = 1000,
-                                            conf = 0.95,
-                                            seed = 1) {
+                                           resolutions,
+                                           graph.name = "int_snn", 
+                                           nn.graph.name = "int_nn", 
+                                           reduction  = "integrated.rpca",
+                                           dims       = 1:30,
+                                           n_subsample = 5,
+                                           subsample_frac = 0.8,
+                                           boot_reps = 1000,
+                                           conf = 0.95,
+                                           seed = 1) {
   if (!requireNamespace("scclusteval", quietly = TRUE)) {
     stop("Package 'scclusteval' is required for stability selection. Install with:\n",
          "  renv::install(\"crazyhottommy/scclusteval\"); renv::snapshot()")
   }
   set.seed(seed)
   all.cells <- colnames(obj)
-
+  
   # Percentile bootstrap CI of the median (dependency-free; chooseR uses a BCa
   # bootstrap via boot::, this is the lightweight equivalent).
   boot_median_ci <- function(x, conf = 0.95, R = 1000) {
@@ -604,13 +628,13 @@ select_resolution_by_stability <- function(obj,
     q <- stats::quantile(meds, c(a, 1 - a), names = FALSE)
     c(low = q[1], high = q[2])
   }
-
+  
   rows <- lapply(resolutions, function(res) {
     ref.obj <- FindClusters(obj, graph.name = graph.name,
                             resolution = res, verbose = FALSE)
     ref.lab <- stats::setNames(as.character(Idents(ref.obj)), colnames(ref.obj))
     ref.clusters <- sort(unique(ref.lab))
-
+    
     # per-cluster best Jaccard accumulated across subsamples (NA where a ref
     # cluster is absent from a given subsample; averaged with na.rm)
     acc <- matrix(NA_real_, nrow = length(ref.clusters), ncol = n_subsample,
@@ -623,7 +647,7 @@ select_resolution_by_stability <- function(obj,
       sub <- FindClusters(sub, graph.name = graph.name,
                           resolution = res, verbose = FALSE)
       test.lab <- stats::setNames(as.character(Idents(sub)), colnames(sub))
-
+      
       # Compare on the SHARED cells: reference labels restricted to the subsample
       # vs the re-clustering. scclusteval returns a rows(ref) x cols(test) matrix
       # of pairwise Jaccard; row max = each reference cluster's best match.
@@ -634,7 +658,7 @@ select_resolution_by_stability <- function(obj,
     }
     cluster.stability <- rowMeans(acc, na.rm = TRUE)  # one score per ref cluster
     ci <- boot_median_ci(cluster.stability, conf = conf, R = boot_reps)
-
+    
     data.frame(resolution = res,
                n_clusters = length(ref.clusters),
                median     = stats::median(cluster.stability, na.rm = TRUE),
@@ -642,9 +666,9 @@ select_resolution_by_stability <- function(obj,
                high       = unname(ci["high"]),
                row.names  = NULL)
   })
-
+  
   df <- do.call(rbind, rows)
-
+  
   # Threshold + choice over NON-TRIVIAL resolutions only (>= 2 clusters).
   valid <- df[df$n_clusters >= 2 & is.finite(df$low), , drop = FALSE]
   if (nrow(valid) == 0) {
@@ -654,8 +678,8 @@ select_resolution_by_stability <- function(obj,
   threshold <- max(valid$low)
   clears <- valid[is.finite(valid$median) & valid$median >= threshold, , drop = FALSE]
   chosen <- if (nrow(clears) > 0) max(clears$resolution) else
-            valid$resolution[which.max(valid$median)]
-
+    valid$resolution[which.max(valid$median)]
+  
   list(summary = df, threshold = threshold, chosen_resolution = chosen)
 }
 
@@ -721,9 +745,9 @@ qc_facet_plot <- function(dat,
                           title         = NULL,
                           drop.inactive = TRUE,
                           shade.stage   = "raw") {
-
+  
   by.stage <- "stage" %in% names(dat)
-
+  
   # A bound that excludes zero cells is not a filter. Blank it so red shading
   # always means "cells are removed here" (config ships rbc_ceiling = 100 and
   # ribo_floor = 0, neither of which cuts anything).
@@ -736,9 +760,9 @@ qc_facet_plot <- function(dat,
         thresholds$upper[i] <- NA_real_
     }
   }
-
+  
   p <- ggplot(dat, aes(x = Sample, y = value))
-
+  
   if (!is.null(thresholds)) {
     lo <- thresholds[!is.na(thresholds$lower), , drop = FALSE]
     hi <- thresholds[!is.na(thresholds$upper), , drop = FALSE]
@@ -760,23 +784,23 @@ qc_facet_plot <- function(dat,
       geom_hline(data = hi, inherit.aes = FALSE, aes(yintercept = upper),
                  colour = "red", linetype = "dashed", linewidth = 0.5)
   }
-
+  
   # scale = "width" is the fix for the current plots: a handful of cells at
   # percent.mt ~95 or nCount ~175k otherwise squash every violin into a sliver.
   p <- p +
     geom_violin(scale = "width", fill = NA, linewidth = 0.3) +
     geom_boxplot(width = 0.12, fill = NA, linewidth = 0.3,
                  outlier.size = 0.15, outlier.alpha = 0.25)
-
+  
   p <- p + if (by.stage) {
     facet_grid(metric ~ stage, scales = "free_y", switch = "y")
   } else {
     facet_wrap(~ metric, scales = "free_y", nrow = facet.nrow)
   }
-
+  
   if (log.y) p <- p + scale_y_log10(
     labels = scales::label_number(scale_cut = scales::cut_short_scale()))
-
+  
   p +
     labs(title = title, x = NULL, y = NULL) +
     theme(axis.text.x  = element_text(angle = 45, hjust = 1, size = 7),
@@ -787,7 +811,7 @@ qc_facet_plot <- function(dat,
 qc_attrition <- function(md, spec) {
   miss <- setdiff(names(spec), names(md))
   if (length(miss)) stop("metrics not found in metadata: ", paste(miss, collapse = ", "))
-
+  
   fails <- vapply(names(spec), function(nm) {
     v <- md[[nm]]; b <- spec[[nm]]
     f <- rep(FALSE, length(v))
@@ -796,17 +820,17 @@ qc_attrition <- function(md, spec) {
     if (!is.na(b["upper"])) f <- f | (!is.na(v) & v > b["upper"])
     f
   }, logical(nrow(md)))
-
+  
   n.crit <- rowSums(fails)
   n.fail <- colSums(fails)
-
+  
   data.frame(
     criterion      = names(spec),
     # "min"/"max" instead of >=/<=: avoids LaTeX text-mode angle brackets
     bound          = vapply(spec, function(b) paste(c(
-                       if (!is.na(b["lower"])) paste0("min ", b["lower"]),
-                       if (!is.na(b["upper"])) paste0("max ", b["upper"])),
-                       collapse = ", "), ""),
+      if (!is.na(b["lower"])) paste0("min ", b["lower"]),
+      if (!is.na(b["upper"])) paste0("max ", b["upper"])),
+      collapse = ", "), ""),
     cells_lost     = n.fail,
     lost_only_here = colSums(fails & n.crit == 1),
     pct_of_total   = round(100 * n.fail / nrow(md), 2),

@@ -38,17 +38,8 @@ if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
 # took more than 5 hours, but with presto loaded it took less than 
 # 5 minutes!!
 #
-# The latest ragg, which is a dependency for devtools, which is itself required
-# for presto install, doesn't work with R/4.4.0 (as of 13-Nov-2025), so install 
-# an older version of ragg, then install devtools, then install presto
-# 
-# install.packages(
-#   "https://cran.r-project.org/src/contrib/Archive/ragg/ragg_1.4.0.tar.gz",
-#   repos = NULL,
-#   type = "source"
-# )
-# install.packages(devtools)
-# devtools::install_github("immunogenomics/presto")
+# With this R project loaded, try
+# renv::install("immunogenomics/presto")
 if (!requireNamespace("presto", quietly = TRUE)) {
   message("Warning: presto not installed — FindAllMarkers will take a long time to run.")
 }
@@ -570,9 +561,17 @@ save_png_plot(p.stab,
 p.stab
 ```
 
-```{r clustree_plot, eval = requireNamespace("clustree", quietly = TRUE)}
+```{r clustree_plot, eval = requireNamespace("clustree", quietly = TRUE) && requireNamespace("ggraph", quietly = TRUE)}
+# ggraph must be ATTACHED, not merely loaded. clustree only Imports it, and
+# ggplot2 resolves string guides (clustree's edge scale asks for
+# "edge_colourbar") by searching the ATTACHED packages for a matching
+# guide_*() function. guide_edge_colourbar() lives in ggraph, so with ggraph
+# unattached the plot dies with "Unknown guide: edge_colourbar".
+# See ggraph issue #386.
+suppressPackageStartupMessages(library(ggraph))
+
 # Optional override aid: how clusters split/merge across the grid. Skipped
-# automatically if the clustree package isn't installed. NOTE: this recomputes
+# automatically if clustree or ggraph isn't installed. NOTE: this recomputes
 # FindClusters across the grid to populate the int_snn_res.* columns; it could
 # be merged with the stability sweep later to avoid the double pass.
 for (res in resolutions) {
@@ -586,6 +585,7 @@ save_png_plot(clustree.plot,
               width = 9, height = 11)
 clustree.plot
 ```
+
 
 ```{r stamp_proposed_resolution}
 # 2a PROPOSES; it does not write to config.yaml. The proposal rides along in

@@ -48,7 +48,7 @@ if (!suppressMessages(require(kableExtra))) stop("kableExtra is required")
 #   repos = NULL,
 #   type = "source"
 # )
-# install.packages(devtools)
+# install.packages("devtools")
 # devtools::install_github("immunogenomics/presto")
 if (!requireNamespace("presto", quietly = TRUE)) {
   message("Warning: presto not installed — FindAllMarkers will take a long time to run.")
