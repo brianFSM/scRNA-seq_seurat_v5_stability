@@ -475,7 +475,7 @@ print(paste0("Saved integrated object (with int_snn graph) to ", integrated.seur
 ```
 
 
-```{r read_obj_testing}
+```{r read_obj_testing, eval=FALSE}
 seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
 
 integrated.reduction.label <- "integrated.rpca"
