@@ -11,10 +11,10 @@
 #SBATCH --mem=80G
 export MC_CORES=${SLURM_NTASKS}
 module purge all
-module load R/4.4.0
+module load R/4.5.1
 module load geos/3.8.1
 module load hdf5/1.8.19-serial
-module load pandoc/2.2.1
+module load pandoc/2.14.0.3-gcc
 
 # Pass one or more .Rmd files. They are rendered in order against one config
 # (config.yaml by default; override with --export=ALL,CONFIG_FILE=other.yaml).
