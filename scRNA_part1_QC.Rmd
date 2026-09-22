@@ -157,8 +157,6 @@ render_formatted_table(qc.table)
 
 <!-- Import the 10x data (either matrices or h5) and create a merged seurat object with counts of each sample as layers. -->
 
-Objects created for:
-
 ```{r soupx_explainer, eval=run.soupx, results='asis'}
 cat(c(
 "### Ambient RNA correction (SoupX)",
