@@ -51,7 +51,7 @@ config.args <- read_yaml(params$config.args)
 run_metrics_tables=TRUE
 metrics.table.string <- config.args$analysis$part1$generate_metrics_tables
 
-if (metrics.table.string == "FALSE"){
+if (isFALSE(as.logical(metrics.table.string %||% TRUE))){
   run_metrics_tables=FALSE
 }
 
@@ -64,47 +64,28 @@ p2 <- cfg.analysis$part2
 ################################################################################
 # set project variables
 ################################################################################
-part2.suffix <- p2$part2_suffix
 analyst.name <- config.args$project$`analyst-name`
 formatted.samples <- config.args$project$samples # Sanitized below
 experiment.name = config.args$project$`project-name` 
-project.description <- config.args$project$`project-decription`
+project.description <- config.args$project$`project-description`
 dataset.path <- config.args$data$parent_directory_path
-import.h5 <- config.args$data$`import-h5` # set to false if you want to import the matrix files
 organism = config.args$project$organism
-num.clusters <- config.args$analysis$part2$num_clusters
-
-clustering.resolution <- p2$clustering_resolution
-if (is.null(clustering.resolution) || identical(as.character(clustering.resolution), "None"))
-  stop("clustering_resolution is not set in the config — run part 2b before part 3.")
 
 ################################################################################
-# Set output directory paths
+# Input paths. Part 3 reads from all three stages; see stage_dirs().
 ################################################################################
+dirs <- stage_dirs(config.args, with.part2b = TRUE)
+if (!dir.exists(dirs$part2b))
+  stop("Part 2b output not found at ", dirs$part2b,
+       " - run part 2b (at resolution ", dirs$resolution, ") first.")
 
-r.obj.loc <- config.args$data$`rds-file-path` # Output folder
+QC.tables.path    <- file.path(dirs$part1,  p1$part1_report_tables_filename)
+part2.tables.path <- file.path(dirs$part2a, p2$part2_report_tables_filename)
 
-# When trying different parameters in the analysis you can create
-# alternate output files with this 'suffix' argument in the config
-part1.suffix <- p1$part1_suffix
-
-unfiltered.seurat.obj.file <- config.args$analysis$part1$unfiltered_seurat_obj_file
-unfiltered.seurat.obj.file <- sub(".RDS", paste0(part1.suffix, ".RDS"), unfiltered.seurat.obj.file )
-unfiltered.seurat.obj.path <- file.path(r.obj.loc, unfiltered.seurat.obj.file)
-
-QC.tables.file <- p1$part1_report_tables_filename
-QC.tables.file <-sub(".RData", paste0(part1.suffix, ".RData"), QC.tables.file)
-QC.tables.path <-file.path(r.obj.loc, QC.tables.file)
-
-
-part2.suffix <- p1$part1_suffix
-part2.tables.path <- suffix_path(r.obj.loc, p2$part2_report_tables_filename, part2.suffix)
-
-
-ggplot.directory.name <- p1$ggplot_dir
-ggplot.directory <- file.path(r.obj.loc, ggplot.directory.name)
-
-marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
+ggplot.dir.p1   <- file.path(dirs$part1,  p1$ggplot_dir)   # no consumer yet
+ggplot.dir.p2a  <- file.path(dirs$part2a, p1$ggplot_dir)
+ggplot.dir.p2b  <- file.path(dirs$part2b, p1$ggplot_dir)
+marker.gene.dir <- file.path(dirs$part2b, p2$marker_gene_dir)
 
 ids <- sanitize_sample_names(formatted.samples)
 ```
@@ -154,8 +135,9 @@ the excluded range; right column post-filter. Cell counts per sample are in the 
 
 
 ```{r qc_figures, out.width='100%'}
-knitr::include_graphics(file.path(ggplot.directory,
-  c("qc_counts_before_after.png", "qc_percent_before_after.png")))
+knitr::include_graphics(vapply(
+  c("qc_counts_before_after.png", "qc_percent_before_after.png"),
+  function(x) plot_path(ggplot.dir.p2a, x), character(1), USE.NAMES = FALSE))
 ```
 
 \elandscape
@@ -170,7 +152,7 @@ and then the number of cells remaining after filtering.
 
 ```{r filtering_res_table, results='asis'}
 
-combo.table <-  read.csv(file.path(r.obj.loc, "filtering_stats_table.csv"))
+combo.table <-  read.csv(file.path(dirs$part2a, "filtering_stats_table.csv"))
 
 colnames(combo.table)[1] <- "Metric"
 
@@ -205,7 +187,7 @@ render_plain_table(qc.attrition.table,
 ## Pre-integration UMAP
 
 ```{r pre-int_umap}
-merged.umap.path <- file.path(ggplot.directory, "umap_merged_seruat_obj.png")
+merged.umap.path <- plot_path(ggplot.dir.p2a, "umap_merged_seruat_obj.png")
 
 knitr::include_graphics(merged.umap.path)
 ```
@@ -218,7 +200,7 @@ of cell types across samples. Go [here](https://satijalab.org/seurat/articles/in
 ## Post-integration UMAP by sample
 
 ```{r post-int_umap}
-integrated.umap.path <- file.path(ggplot.directory, "integrated_umap_by_sample.png")
+integrated.umap.path <- plot_path(ggplot.dir.p2a, "integrated_umap_by_sample.png")
 
 knitr::include_graphics(integrated.umap.path)
 ```
@@ -237,7 +219,7 @@ The plot below shows this stability at each resolution (higher is more stable), 
 ## Cluster stability by resolution
 
 ```{r cluster_stability}
-clust.stability.res.path <- file.path(ggplot.directory, "stability_vs_resolution.png")
+clust.stability.res.path <- plot_path(ggplot.dir.p2a, "stability_vs_resolution.png")
 
 knitr::include_graphics(clust.stability.res.path)
 ```
@@ -246,7 +228,7 @@ knitr::include_graphics(clust.stability.res.path)
 ## Post-integration UMAP by cluster
 
 ```{r clusters_by_res}
-cluster.umap.path <- file.path(ggplot.directory, "integrated_umap_by_cluster.png")
+cluster.umap.path <- plot_path(ggplot.dir.p2b, "integrated_umap_by_cluster.png")
 
 knitr::include_graphics(cluster.umap.path)
 ```
@@ -257,7 +239,7 @@ knitr::include_graphics(cluster.umap.path)
 
 ```{r cluster_sample_table, results='asis'}
 
-cluster.sample.df <- read.csv(file.path(r.obj.loc, "cells_perCluster_perSample.csv"),
+cluster.sample.df <- read.csv(file.path(dirs$part2b, "cells_perCluster_perSample.csv"),
                               row.names=1)
 cluster.sample.df %>%
   kable(format = "latex",
@@ -291,21 +273,20 @@ assay.used <- "SCT"
 # Cluster IDs come from the marker table 2b wrote, not 0:(num_clusters - 1):
 # a cluster with no positive markers gets no figures (only.pos = TRUE), and IDs
 # aren't guaranteed contiguous if clusters were filtered by hand.
-marker.csv <- file.path(marker.gene.dir,
-                        paste0("cluster_markers_", clustering.resolution, ".csv"))
+marker.csv <- file.path(marker.gene.dir, "cluster_markers.csv")
 if (!file.exists(marker.csv))
   stop("Marker table not found: ", marker.csv, " — run part 2b first.")
 clusters.present <- sort(unique(read.csv(marker.csv)$cluster))
 
 # Mirror the plot types 2b was configured to draw, so part 3 never asks for a
 # panel that was never generated.
-marker.plot.types <- p2$marker_plot_types %||% c("feat", "dot")
+marker.plot.types <- unlist(p2$marker_plot_types) %||% c("feat", "dot")
 
 # One path per (cluster, kind), interleaved so each cluster's panels stay together.
 figure.list <- unlist(lapply(clusters.present, function(cluster.num) {
   vapply(marker.plot.types,
-         function(kind) marker_plot_path(ggplot.directory, cluster.num, kind,
-                                         assay.used, part2.suffix),
+         function(kind) marker_plot_path(ggplot.dir.p2b, cluster.num, kind,
+                                         assay.used),
          character(1))
 }), use.names = FALSE)
 
@@ -316,10 +297,19 @@ if (length(absent))
 figure.list <- figure.list[file.exists(figure.list)]
 
 if (length(figure.list) == 0) {
-  cat("No marker gene plots were found in", ggplot.directory, "\n")
+  cat("No marker gene plots were found in", ggplot.dir.p2b, "\n")
 } else {
   knitr::include_graphics(figure.list)
 }
+```
+
+
+## Analysis parameters
+
+```{r run_parameters}
+run.params <- read.csv(file.path(dirs$part2b, "run_parameters.csv"),
+                       stringsAsFactors = FALSE)
+render_plain_table(run.params, caption = "Analysis parameters for this run")
 ```
 
 
@@ -327,4 +317,5 @@ if (length(figure.list) == 0) {
 ```{r sessioinfo}
 sessionInfo()
 ```
+
 
