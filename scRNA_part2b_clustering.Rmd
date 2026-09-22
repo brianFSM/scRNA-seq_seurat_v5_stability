@@ -24,7 +24,6 @@ source("functions_for_report.R") # This is the file that holds the R functions u
 ```{r libraries}
 if (!suppressMessages(require(Seurat))) stop("Seurat is required")
 if (!suppressMessages(require(yaml))) stop("yaml is required")
-if (!suppressMessages(require(cluster))) stop("cluster is required") # For silhouette score calculation
 if (!suppressMessages(require(future))) stop("future is required")
 if (!suppressMessages(require(future.apply))) stop("future.apply is required")
 if (!suppressMessages(require(cowplot))) stop("cowplot is required")
@@ -73,8 +72,9 @@ cfg.analysis <- cfg$analysis
 p1  <- cfg.analysis$part1
 p2 <- cfg.analysis$part2
 
-base.obj.loc <- cfg$data$`rds-file-path`   # shared root: part 1 artifacts
-r.obj.loc    <- run_dir(cfg)               # this run's outputs (created if absent)
+dirs     <- stage_dirs(cfg, with.part2b = TRUE, create = "part2b")
+best_res <- dirs$resolution   # config number, or 2a's proposal under 'auto'
+message("Clustering at resolution ", best_res, " -> ", dirs$part2b)
 organism <- cfg$project$organism
 
 ################################################################################
@@ -99,21 +99,14 @@ if (run.doubletFinder){
 ################################################################################
 # I/O paths
 ################################################################################
-part1.suffix <- p1$part1_suffix
-run.name     <- cfg.analysis$run_name %||% "default"
+# Inputs: part 2a's directory.
+integrated.seurat.obj.path <- file.path(dirs$part2a, p2$integrated_seurat_obj_file)
 
-# Part 1 artifacts are shared across runs and live at the SHARED ROOT.
-unfiltered.seurat.obj.path <- suffix_path(base.obj.loc, p1$part1_rds_save_filename,      part1.suffix)
-QC.tables.path             <- suffix_path(base.obj.loc, p1$part1_report_tables_filename, part1.suffix)
-
-# Everything in THIS RUN. No filename suffixes: the run directory keeps
-# alternate runs apart. 2b reads 2a's integrated object and writes a SEPARATE
-# clustered object, so 2a's output is never clobbered.
-merged.seurat.obj.path     <- file.path(r.obj.loc, p2$merged_seurat_obj_file)
-integrated.seurat.obj.path <- file.path(r.obj.loc, p2$integrated_seurat_obj_file)
-clustered.seurat.obj.path  <- file.path(r.obj.loc, p2$clustered_seurat_obj_file)
-ggplot.directory           <- file.path(r.obj.loc, p1$ggplot_dir)
-marker.gene.dir            <- file.path(r.obj.loc, p2$marker_gene_dir)
+# Outputs: this resolution's directory. 2b writes a SEPARATE clustered object,
+# so 2a's integrated object is never clobbered.
+clustered.seurat.obj.path  <- file.path(dirs$part2b, p2$clustered_seurat_obj_file)
+ggplot.directory           <- file.path(dirs$part2b, p1$ggplot_dir)
+marker.gene.dir            <- file.path(dirs$part2b, p2$marker_gene_dir)
 
 for (d in c(ggplot.directory, marker.gene.dir))
   dir.create(d, showWarnings = FALSE, recursive = TRUE)
@@ -142,25 +135,27 @@ future::plan("sequential")
 
 ## Inputs and staleness check
 
-Part 2b consumes the integrated object produced by part 2a. It re-clusters at the
-resolution recorded in the config (`clustering_resolution_value`), which you can
-override by hand, then runs marker discovery and plots.
+Part 2b consumes the integrated object produced by part 2a. It re-clusters at
+`clustering_resolution_value` from the config: a number you set by hand, or
+`auto`, which reads the resolution part 2a proposed from
+`proposed_resolution.txt` in the part 2a directory. It then runs marker
+discovery and plots.
 
 ```{r guard_and_load}
 # 1) The integrated object must exist.
 if (!file.exists(integrated.seurat.obj.path)) {
   stop("Integrated object not found at ", integrated.seurat.obj.path,
-       "\nRun part 2a first, or check run_name / part1_suffix in the config.")
+       "\nRun part 2a first, or check part1_suffix / part2a_suffix in the config.")
 }
 
 seurat5.obj.integrated <- readRDS(integrated.seurat.obj.path)
 
 # 2) The object must have been built under the CURRENT upstream settings.
-#    If QC cutoffs / doublet flag / organism / suffixes changed since 2a ran,
+#    If QC cutoffs / doublet flag / organism changed since 2a ran,
 #    this object is stale and 2a must be re-run.
 current.params <- upstream_params(
   p2 = p2, run.doubletFinder = run.doubletFinder,
-  organism = organism, part1.suffix = part1.suffix, run.name = run.name
+  organism = organism
 )
 stop_if_stale(seurat5.obj.integrated, current.params)
 
@@ -174,24 +169,8 @@ if (all(g@x == 1)) stop("'int_snn' holds a nearest-neighbor graph, not an SNN gr
 ## Clustering
 
 ```{r run_clustering}
-# Resolution comes from the config value (proposed by 2a, or your override).
-rv <- p2$clustering_resolution_value
-best_res <- if (is.null(rv) || identical(tolower(as.character(rv)), "auto")) {
-  pr <- seurat5.obj.integrated@misc$proposed_resolution
-  if (is.null(pr))
-    stop("clustering_resolution_value is 'auto' but part 2a recorded no ",
-         "proposal in the object. Re-run part 2a, or set a number by hand.")
-  message("Using part 2a's proposed resolution: ", pr)
-  pr
-} else {
-  n <- suppressWarnings(as.numeric(rv))
-  if (is.na(n))
-    stop("clustering_resolution_value must be a number or 'auto', got: ", rv)
-  message("Using manual override: ", n)
-  n
-}
-
-
+# best_res was resolved by stage_dirs() in the setup chunk: the config number,
+# or 2a's proposed_resolution.txt under 'auto'.
 cat("Clustering at resolution:", best_res, "\n")
 
 seurat5.obj.integrated <- FindClusters(seurat5.obj.integrated,
@@ -242,19 +221,19 @@ cat(paste0("Saved clustered object (resolution ", clustering.resolution,
 # the parameters table in the client report.
 ################################################################################
 run.params <- data.frame(
-  parameter = c("Run name", "Organism", "SoupX", "DoubletFinder",
+  parameter = c("Output directory", "Organism", "SoupX", "DoubletFinder",
                 "Mito ceiling (%)", "nCount range", "nFeature range",
                 "Hemoglobin ceiling (%)", "Ribosomal floor (%)",
                 "Clustering resolution", "Clusters"),
   value = as.character(c(
-    run.name, organism, p1$run_SoupX, run.doubletFinder,
+    dirs$part2b, organism, p1$run_SoupX, run.doubletFinder,
     mito.ceiling,
     paste(RNA.count.floor, "-", RNA.count.ceiling),
     paste(feature.count.floor, "-", feature.count.ceiling),
     rbc.ceiling, ribo.floor,
     best_res, num.clusters)),
   stringsAsFactors = FALSE)
-write.csv(run.params, file.path(r.obj.loc, "run_parameters.csv"), row.names = FALSE)
+write.csv(run.params, file.path(dirs$part2b, "run_parameters.csv"), row.names = FALSE)
 ```
 
 ## Table of cells from each sample per cluster
@@ -280,36 +259,9 @@ cluster.sample.df <- cbind(Cluster = c(rownames(cluster.sample.df)[-nrow(cluster
 rownames(cluster.sample.df) <- NULL
 cluster.sample.df
 
-write.csv(cluster.sample.df, file.path(r.obj.loc, "cells_perCluster_perSample.csv"), quote=FALSE)
+write.csv(cluster.sample.df, file.path(dirs$part2b, "cells_perCluster_perSample.csv"), quote=FALSE)
 ```
 
-## Umap of the Seurat object after integration, colored by sample
-
-```{r integrated_umap_by_sample}
-integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated,
-                                        pt.size = 0.001,
-                                        reduction = "umap.postint",
-                                        shuffle = TRUE,
-                                        group.by = "sample_id")
-
-
-# If you want to see this plot faceted by sample, i.e. one plot per sample, 
-# uncomment this code:
-
-# integrated.dimplot.by.sample <- DimPlot(seurat5.obj.integrated, 
-#                                         pt.size = 0.001, 
-#                                         reduction = "umap.postint", 
-#                                         group.by = "sample_id", 
-#                                         split.by = "sample_id", 
-#                                         ncol = 2) + NoLegend()
-
-
-save_png_plot(integrated.dimplot.by.sample, 
-              plot_path(ggplot.directory, "integrated_umap_by_sample.png"))
-              
-integrated.dimplot.by.sample
-
-```
 ## Umap of the Seurat object after integration, colored by clusters 
 
 ```{r integrated_umap_by_cluster}
@@ -324,7 +276,7 @@ save_png_plot(integrated.dimplot.by.cluster,
 integrated.dimplot.by.cluster
 ```
 
-## UMAP of PCA
+## PCA (pre-integration)
 
 ```{r pca_plots}
 pca_post <- DimPlot(seurat5.obj.integrated, reduction = "pca", group.by = "sample_id", label = TRUE)
@@ -486,4 +438,5 @@ saveRDS(seurat5.obj.integrated, clustered.seurat.obj.path, compress=FALSE)
 # markers$cluster <- old.to.new[as.character(markers$cluster)]
 
 ```
+
 
