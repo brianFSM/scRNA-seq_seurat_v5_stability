@@ -1,5 +1,5 @@
 ---
-title: "scRNA-seq Summary Report"
+title: "scRNA-seq Group Comparisons"
 output:
   pdf_document:
     toc: true
@@ -24,13 +24,9 @@ source("functions_for_report.R") # This is the file that holds the R functions u
 ```{r libraries}
 if (!suppressMessages(require(Seurat))) stop("Seurat is required")
 if (!suppressMessages(require(yaml))) stop("yaml is required")
-if (!suppressMessages(require(cluster))) stop("cluster is required") # For silhouette score calculation
-if (!suppressMessages(require(future))) stop("future is required")
-if (!suppressMessages(require(future.apply))) stop("future.apply is required")
 if (!suppressMessages(require(cowplot))) stop("cowplot is required")
 if (!suppressMessages(require(parallelly))) stop("parallelly is required")
 if (!suppressMessages(require(ggplot2))) stop("ggplot2 is required")
-if (!suppressMessages(require(DoubletFinder))) stop("DoubletFinder is required")
 
 
 # the presto lib isn't required, but FindAllMarkers runs MUCH faster with it. 
@@ -66,7 +62,7 @@ config.args <- read_yaml(params$config.args)
 ```{r user_vals, eval=TRUE}
 cfg <- config.args
 cfg.analysis <- cfg$analysis
-
+node.type <- cfg.analysis$node_type
 p1  <- cfg.analysis$part1
 p2 <- cfg.analysis$part2
 
@@ -74,37 +70,17 @@ r.obj.loc <- cfg$data$`rds-file-path`
 organism <- cfg$project$organism
 
 ################################################################################
-# QC cutoffs
+# I/O paths. Reads the clustered object from res_<resolution>/; see stage_dirs().
 ################################################################################
-
-mito.ceiling = p2$mito_ceiling
-RNA.count.floor = p2$RNA_count_floor
-RNA.count.ceiling = p2$RNA_count_ceiling
-feature.count.floor = p2$feature_count_floor
-feature.count.ceiling = p2$feature_count_ceiling
-rbc.ceiling = p2$rbc_ceiling
-ribo.floor = p2$ribo_floor
-
-node.type <- cfg.analysis$node_type
-
-################################################################################
-# I/O paths
-################################################################################
-part1.suffix <- p1$part1_suffix
-part2.suffix <- p2$part2_suffix
-
-integrated.seurat.obj.path <- suffix_path(r.obj.loc, p2$integrated_seurat_obj_file, part2.suffix)
-QC.tables.path         <- suffix_path(r.obj.loc, p1$part1_report_tables_filename, part1.suffix)
-ggplot.directory       <- file.path(r.obj.loc, p1$ggplot_dir)
-marker.gene.dir <- suffix_path(r.obj.loc, p2$marker_gene_dir, part2.suffix)
-
-  if (!file.exists(ggplot.directory)) {
- dir.create(ggplot.directory, showWarnings = FALSE, recursive = TRUE)
-}
+dirs <- stage_dirs(cfg, with.part2b = TRUE)
+clustered.seurat.obj.path <- file.path(dirs$part2b, p2$clustered_seurat_obj_file)
+ggplot.directory          <- file.path(dirs$part2b, p1$ggplot_dir)
+marker.gene.dir           <- file.path(dirs$part2b, p2$marker_gene_dir)
 
 if (!file.exists(marker.gene.dir)) {
  dir.create(marker.gene.dir, showWarnings = FALSE, recursive = TRUE)
 }
+
 ```
 
 
@@ -125,7 +101,9 @@ if (node.type == "compute"){
 
 
 ```{r load_data}
-seurat5.obj <- readRDS(file=integrated.seurat.obj.path)
+# The CLUSTERED object carries 2b's PrepSCTFindMarkers() correction, which is
+# why the PrepSCTFindMarkers() call below stays commented out.
+seurat5.obj <- readRDS(file=clustered.seurat.obj.path)
 ```
 
 ```{r group_assignment}
