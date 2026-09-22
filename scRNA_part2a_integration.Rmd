@@ -10,7 +10,7 @@ params:
   config.args: "./config.yaml"
 ---
 
-```{r setup}
+```{r setup, echo=FALSE}
 knitr::opts_chunk$set(
   warning=FALSE,error=FALSE, message=TRUE, echo=FALSE
 )
@@ -606,6 +606,12 @@ save_png_plot(p.stab,
 p.stab
 ```
 
+
+### Clustree plot
+
+For help with interpretaion, go here: 
+https://lazappi.github.io/clustree/articles/clustree.html
+
 ```{r clustree_plot, eval = requireNamespace("clustree", quietly = TRUE) && requireNamespace("ggraph", quietly = TRUE)}
 # ggraph must be ATTACHED, not merely loaded. clustree only Imports it, and
 # ggplot2 resolves string guides (clustree's edge scale asks for
@@ -648,7 +654,7 @@ saveRDS(seurat5.obj.integrated, integrated.seurat.obj.path, compress = FALSE)
 
 cat("Proposed resolution:", proposed.res, "\n")
 cat("Part 2b will write to res_", format_res(proposed.res), "/ unless ",
-    "clustering_resolution_value is set to a number in the config (currently: ",
+    "clustering_resolution_value is set to a number in the \n config (currently: ",
     as.character(p2$clustering_resolution_value %||% "auto"), ").\n", sep = "")
 ```
 
