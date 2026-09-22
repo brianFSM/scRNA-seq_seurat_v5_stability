@@ -16,19 +16,64 @@ portable — see [Running elsewhere](#running-elsewhere).
 
 | Report | Reads | Does | Writes |
 |---|---|---|---|
-| `scRNA_part1_QC.Rmd` | CellRanger output dirs | Loads matrices (optional SoupX), computes per-cell QC metrics, plots raw distributions with filter thresholds shaded | `_0_raw_seurat_object.RDS`, QC tables, PNGs |
-| `scRNA_part2a_integration.Rmd` | part 1 RDS | Applies QC cutoffs, optional DoubletFinder, SCTransform → PCA → UMAP → RPCA integration → builds the `int_snn` graph → **subsample-stability resolution sweep** | integrated RDS (with graph + upstream-param stamp), stability/clustree PNGs, **writes a proposed resolution to config** |
-| `scRNA_part2b_clustering.Rmd` | part 2a RDS | Staleness-checks the handoff, clusters at the config resolution, runs `FindAllMarkers`, generates per-cluster feature/dot plots | clustered RDS, marker CSVs, PNGs, **writes the derived resolution label + cluster count to config** |
-| `scRNA_part3_summary.Rmd` | PNGs + CSVs from parts 1–2 | Stitches everything into one client-facing summary PDF. Computes nothing new. | summary PDF |
+| `scRNA_part1_QC.Rmd` | CellRanger output dirs | Loads matrices (optional SoupX ambient-RNA correction), computes per-cell QC metrics, plots raw distributions | `_0_raw_seurat_object.RDS`, QC tables, raw QC PNGs |
+| `scRNA_part2a_integration.Rmd` | part 1 RDS | Applies QC cutoffs, optional DoubletFinder, SCTransform → PCA → UMAP → RPCA integration → builds the `int_snn` graph → **subsample-stability resolution sweep** | integrated RDS (graph + upstream-param stamp), `proposed_resolution.txt`, filtering/attrition CSVs, stability + clustree PNGs |
+| `scRNA_part2b_clustering.Rmd` | part 2a RDS | Staleness-checks the handoff, clusters at the resolved resolution, runs `FindAllMarkers`, draws per-cluster marker plots | clustered RDS, marker CSVs, cluster PNGs, `run_parameters.csv` |
+| `scRNA_part3_summary.Rmd` | figures + tables from all three stages | Stitches everything into one client-facing summary PDF. Computes nothing new. | summary PDF |
 | `scRNA_part4_group_comparisons.Rmd` | part 2b RDS | **Template/stub.** Between-group DE (e.g. by sex, treatment). Edit before use — see [Part 4 is a template](#part-4-is-a-template). | group marker CSVs |
 
-`functions_for_report.R` holds all helpers (path handling, 10x loading, metric
-tables, plotting, the stability selector). Sourced by every report.
+`functions_for_report.R` holds all helpers — stage-directory resolution, 10x
+loading, metric tables, plotting, the stability selector. Sourced by every
+report.
 
 **The intended loop:** render part 1 → read the QC PDF → set your cutoffs in
 `config.yaml` → render 2a + 2b (2a proposes a clustering resolution, 2b clusters
-and discovers markers) → render part 3 for the summary. Re-clustering later is
-cheap: edit one config value and re-run 2b alone (see [Running](#running)).
+and finds markers) → render part 3 for the summary. Re-clustering later is cheap:
+set one config value and re-run 2b alone (see [Running](#running)).
+
+---
+
+## Output layout
+
+Each stage writes into a directory nested inside the stage it depends on, so a
+directory's path *is* its provenance — a part 2b result can't be paired with the
+wrong part 2a, because it lives inside it.
+
+```
+<rds-file-path>/
+  part1[_<part1_suffix>]/
+    _0_raw_seurat_object.RDS
+    part1_tables_for_report.RData
+    ggplot/                          raw QC distributions
+    part2a[_<part2a_suffix>]/
+      _1_seurat5_obj_merged.RDS
+      _2_seurat5_obj_integrated.RDS
+      part2_tables_for_report.RData
+      filtering_stats_table.csv
+      qc_attrition_table.csv
+      proposed_resolution.txt
+      ggplot/                        before/after QC, merged + integrated UMAPs,
+                                     stability sweep, clustree
+      res_<resolution>/
+        _3_seurat5_obj_clustered.RDS
+        cells_perCluster_perSample.csv
+        run_parameters.csv
+        marker_genes/                per-cluster and combined marker CSVs
+        ggplot/                      cluster UMAP, PCA, per-cluster marker plots
+```
+
+Three consequences worth knowing:
+
+- **Part 1's object is shared.** It doesn't depend on QC cutoffs, so re-running
+  2a with different cutoffs never re-runs the expensive load.
+- **Resolutions don't collide.** Clustering at 0.4 and then 0.6 produces
+  `res_0.4/` and `res_0.6/` side by side, each with its own markers and figures.
+- **`res_<resolution>/` is the client deliverable.** The part 3 PDF and
+  `marker_genes/` both live there, so it can be zipped and sent as-is.
+
+Suffixes name directories, not files. `part1_suffix: soupx_off` gives
+`part1_soupx_off/`; leaving it `''` gives `part1/`. A separator is inserted for
+you, so `alt` and `_alt` behave identically.
 
 ---
 
@@ -37,20 +82,22 @@ cheap: edit one config value and re-run 2b alone (see [Running](#running)).
 **1. Clone**
 
 RStudio on an analytics node: *File → New Project → Version Control → Git*, with
-repository URL `https://github.com/brianFSM/scRNA-seq_seurat_V5.git`
+repository URL
+`https://github.com/brianFSM/scRNA-seq_seurat_v5_stability.git`
 
 Or from the command line:
 
 ```bash
-git clone https://github.com/brianFSM/scRNA-seq_seurat_V5.git
-cd scRNA-seq_seurat_V5
+git clone https://github.com/brianFSM/scRNA-seq_seurat_v5_stability.git
+cd scRNA-seq_seurat_v5_stability
 module purge all
 module load R/4.5.1
 ```
 
 **2. Restore the environment**
 
-The `renv.lock` committed in this repo is the source of truth. From R, in the
+The `renv.lock` committed in this repo is the source of truth, and includes the
+GitHub-only packages (`scclusteval`, `presto`, `DoubletFinder`). From R, in the
 project directory:
 
 ```r
@@ -58,19 +105,28 @@ renv::init(bare = TRUE)
 renv::restore()
 ```
 
-Upon initially running this repo (either for your first time ever or if you're working in a different R version)
-you will have to install some of these packages "by hand" on quest.
-
-```r
-renv::install("immunogenomics/presto")
-renv.install("remotes")
-remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = TRUE)
-remotes::install_github("crazyhottommy/scclusteval")
-
-```
-
 Packages symlink from the `renv` cache if you've built them before; otherwise
 they compile fresh (slow the first time).
+
+If a GitHub package fails to restore — most often after an R version change —
+install it by hand and re-snapshot:
+
+```r
+renv::install("remotes")
+remotes::install_github("crazyhottommy/scclusteval")     # REQUIRED by part 2a
+remotes::install_github("chris-mcginnis-ucsf/DoubletFinder", force = TRUE)
+remotes::install_github("immunogenomics/presto")
+renv::snapshot()
+```
+
+`presto` depends on `ragg`, which sometimes won't build on Quest. If it fails,
+pin an older source version first:
+
+```r
+install.packages(
+  "https://cran.r-project.org/src/contrib/Archive/ragg/ragg_1.4.0.tar.gz",
+  repos = NULL, type = "source")
+```
 
 **3. PDF rendering (TinyTeX)** — the reports build to PDF via xelatex. First time
 only:
@@ -80,28 +136,16 @@ install.packages("tinytex")
 tinytex::install_tinytex()   # sets up ~/.TinyTeX
 tinytex::is_tinytex()        # should return TRUE
 
-tinytex::reinstall_tinytex() # If running on a new version of R
+tinytex::reinstall_tinytex() # if you move to a new R version
 ```
 
-**4. Two packages worth confirming are present.** If `renv::restore()` didn't
-bring them (GitHub-only or optional), install and re-snapshot:
+**4. Optional packages.** Everything below is optional; the pipeline degrades
+gracefully without it.
 
-```r
-# REQUIRED by part 2a: subsample-stability resolution selection
-remotes::install_github("crazyhottommy/scclusteval")
-
-# OPTIONAL: clustree override plot in part 2a (chunk auto-skips if absent)
-renv::install("clustree")
-
-# RECOMMENDED: dramatically speeds up FindAllMarkers in part 2b
-# (ragg often won't build under R/4.4.0, so pin an older one first)
-install.packages(
-  "https://cran.r-project.org/src/contrib/Archive/ragg/ragg_1.4.0.tar.gz",
-  repos = NULL, type = "source")
-devtools::install_github("immunogenomics/presto")
-
-renv::snapshot()
-```
+| Package | Effect if missing |
+|---|---|
+| `clustree` + `ggraph` | Part 2a's clustree chunk skips silently |
+| `presto` | `FindAllMarkers` in part 2b still runs, but much more slowly |
 
 ---
 
@@ -111,113 +155,111 @@ renv::snapshot()
 cp config_template.yaml config.yaml
 ```
 
-Edit `config.yaml` to point at your data. `config.yaml` is disposable and gets
-*rewritten* by the pipeline (parts 2a/2b write chosen-resolution values back into
-it, which flattens comments) — keep `config_template.yaml` pristine as your
-reference.
+`config.yaml` is **input only** — nothing in the pipeline writes to it, so your
+comments and manual edits survive. `config_template.yaml` is the annotated
+reference; read it alongside this section.
+
+`config.yaml` is gitignored so your real paths stay out of version control.
 
 ### Project + data
 
 ```yaml
 project:
   analyst-name: Your Name
-  project-name: 'MyProject'
-  project-description: "One-line description; appears in the reports."
-  organism: mouse            # 'mouse' or 'human' — sets mito/ribo/hb/Y gene patterns
-  run_cell_cycle: 'TRUE'
-  samples:                   # a real YAML sequence; dashes/spaces in names are fine
+  project-name: 'Test'
+  project-description: "ToDo"
+  organism: mouse            # 'mouse' or 'human'
+  samples:
     - Sample1
     - Sample2
 
 data:
-  parent_directory_path: /path/to/CellRanger   # one sub-directory per sample
-  rds-file-path: /path/to/results              # all output objects/plots land here
+  parent_directory_path: path/to/CellRanger
+  rds-file-path: ./results   # output root; stages nest beneath it
 ```
 
-**Input directory assumption:** for each entry in `samples`,
-`parent_directory_path/<sample>/` must contain a CellRanger `outs/` (or the
-matrices directly), i.e. a `raw_feature_bc_matrix/` (preferred; `filtered_...` is
-used as a fallback) plus `metrics_summary.csv` for the sequencing-QC table. Raw
-is required if you enable SoupX. Samples with a missing `metrics_summary.csv` are
-warned about and simply omitted from the metrics table rather than crashing.
+`samples` are directory names under `parent_directory_path`, each holding
+CellRanger output. `organism` selects the mito/ribo/hemoglobin patterns and the
+Y-chromosome gene list; anything other than `human` or `mouse` stops with an
+explanatory error.
 
 ### Part 1
-Primarily for setting 
-
-Defaults to running soupX. If running PIPseq samples, set `generate_metrics_tables`
-to FALSE
 
 ```yaml
 analysis:
-  run_tests: no
   node_type: analytics
+
   part1:
     part1_rds_save_filename: _0_raw_seurat_object.RDS
     part1_report_tables_filename: part1_tables_for_report.RData
-    part1_suffix: ''
+    part1_suffix: ''           # names part1_<suffix>/
     generate_metrics_tables: 'TRUE'
-    run_SoupX: 'TRUE'
+    run_SoupX: 'TRUE'          # ambient RNA correction; needs the raw matrix
     ggplot_dir: ggplot
 ```
-  
+
+Use `part1_suffix` only when **part 1 itself** varies — SoupX on versus off, say.
+Different QC cutoffs are a part 2a concern and get `part2a_suffix` instead.
+
 ### QC cutoffs (part 2a) — set these *after* reading the part 1 PDF
 
 ```yaml
-part2:
-  mito_ceiling: 5           # max % mitochondrial
-  RNA_count_floor: 500
-  RNA_count_ceiling: 25000
-  feature_count_floor: 300
-  feature_count_ceiling: 6000
-  rbc_ceiling: 100          # max % hemoglobin
-  ribo_floor: 0             # min % ribosomal — see the warning below
+  part2:
+    part2a_suffix: ''          # names part2a_<suffix>/ inside the part 1 dir
+
+    mito_ceiling: 5            # max % mitochondrial
+    RNA_count_floor: 500
+    RNA_count_ceiling: 25000
+    feature_count_floor: 300
+    feature_count_ceiling: 6000
+    rbc_ceiling: 100           # max % hemoglobin
+    ribo_floor: 0              # see the caveat in Methods summary
 ```
+
+Change a cutoff and you should change `part2a_suffix` too, so the new run lands
+beside the old one instead of overwriting it. Part 2a stamps its parameters into
+the integrated object and part 2b refuses a stale handoff, so a forgotten suffix
+surfaces as an error rather than a silent mismatch.
 
 ### Clustering resolution (part 2a proposes, part 2b applies)
 
 ```yaml
-part2:
-  # resolution grid swept for stability
-  cluster_res_min: 0.1
-  cluster_res_max: 1.0
-  cluster_res_step: 0.1
-  # subsample-stability sweep controls
-  stability_reps: 5             # subsamples per resolution (more = steadier, slower)
-  stability_subsample_frac: 0.8
-  stability_threshold: 0.75     # VESTIGIAL — see note
-  # THE knob you edit to re-cluster:
-  clustering_resolution_value: 0.4
-  # derived by part 2b, do not hand-edit:
-  clustering_resolution: None   # e.g. "int_snn_res.0.4"
-  num_clusters: 0
+    cluster_res_min: 0.1
+    cluster_res_max: 1.0
+    cluster_res_step: 0.1
+    stability_reps: 5
+    stability_subsample_frac: 0.8
+    clustering_resolution_value: auto
 ```
 
-- `clustering_resolution_value` is the numeric resolution — the one value you
-  edit by hand to re-cluster. Part 2a writes its proposed value here.
-- `clustering_resolution` and `num_clusters` are *derived outputs* written by
-  part 2b (the metadata column name and the actual cluster count). Don't edit
-  them; 2b overwrites them every run.
-- `stability_threshold` is **no longer used** — the current selector derives its
-  threshold from the data (the highest lower-confidence-bound across
-  resolutions). The key is retained only for backward compatibility and can be
-  ignored or removed.
+Part 2a sweeps the grid, scores each resolution for subsample stability, and
+writes its pick to `proposed_resolution.txt` in its own directory. With
+`clustering_resolution_value: auto`, part 2b uses that. Set a number instead to
+override; part 2a never overwrites your value.
 
-### Toggles
+`stability_reps` is the main cost knob — the sweep runs that many subsampled
+re-clusterings per resolution.
+
+### Output filenames and toggles
 
 ```yaml
-part1:
-  run_SoupX: 'TRUE'              # ambient RNA correction; needs the raw matrix
-  generate_metrics_tables: 'TRUE'
-  part1_suffix: ''                # suffixes part-1 output filenames (alt runs)
-part2:
-  run_doubletFinder: 'TRUE'      # per-sample doublet detection before merging
-  part2_suffix: ''                # suffixes part-2 output filenames (alt runs)
+    merged_seurat_obj_file: _1_seurat5_obj_merged.RDS
+    integrated_seurat_obj_file: _2_seurat5_obj_integrated.RDS
+    clustered_seurat_obj_file: _3_seurat5_obj_clustered.RDS
+    part2_report_tables_filename: part2_tables_for_report.RData
+    marker_gene_dir: marker_genes
+
+    run_doubletFinder: 'TRUE'
+    doublet_rate_per_1k: 0.008   # expected doublets per 1,000 cells recovered
+    doublet_rate_cap: 0.20
+    marker_plot_types:           # any of feat, dot, vln
+      - feat
+      - dot
 ```
 
-`run_SoupX` and `run_doubletFinder` are on by default; if you turn them off, say
-so when reporting results. The `*_suffix` keys let you keep alternate runs
-(different cutoffs) side by side by suffixing every output filename — parts 2b
-and 3 stay in sync via a shared filename helper.
+Filenames are relative to whichever stage directory owns them. The doublet rate
+is applied per sample and scales with that sample's cell count, so a small
+library isn't charged a large library's rate.
 
 ---
 
@@ -239,10 +281,11 @@ ordering without a SLURM dependency). Because they run sequentially, peak memory
 is whichever stage is larger, not the sum.
 
 **Re-cluster at a different resolution** (fast — skips integration entirely):
-edit `clustering_resolution_value` in `config.yaml`, then re-run 2b alone:
+set `clustering_resolution_value` to a number, then re-run 2b alone. The results
+land in a new `res_<resolution>/` beside the existing one.
 
 ```bash
-sbatch run_templates.sh scRNA_part2b_clustering.Rmd
+sbatch run_templates.sh scRNA_part2b_clustering.Rmd scRNA_part3_summary.Rmd
 ```
 
 **Alternate config file** — select it with the `CONFIG_FILE` env var (default
@@ -252,16 +295,15 @@ sbatch run_templates.sh scRNA_part2b_clustering.Rmd
 sbatch --export=ALL,CONFIG_FILE=config_test.yaml run_templates.sh scRNA_part1_QC.Rmd
 ```
 
-Output PDFs are named after the Rmd (`scRNA_part1_QC.pdf`, etc.); objects,
-tables, and plots go to `rds-file-path`. Edit the `#SBATCH --mail-user` line in
-`run_templates.sh` to your address; the defaults (`--mem=80G`, `-t 48:00:00`,
-account `b1042`, genomics partition) suit a large multi-sample run — trim for
-small data.
+Edit the `#SBATCH --mail-user` line in `run_templates.sh` to your address; the
+defaults (`--mem=80G`, `-t 48:00:00`, account `b1042`, genomics partition) suit a
+large multi-sample run — trim for small data.
 
-> **Caveat:** the output PDF name comes from the *Rmd*, not the config, so a
-> `CONFIG_FILE=config_test.yaml` run of part 1 overwrites `scRNA_part1_QC.pdf`.
-> If you're running a real and a test config side by side, that's the collision
-> to watch — the RDS/plot outputs are separated by `*_suffix`, but the PDF is not.
+> **Caveat:** output PDFs are named after the *Rmd* and land in the project
+> directory, not in the stage directory with everything else. So a second run —
+> a different `part2a_suffix`, or `CONFIG_FILE=config_test.yaml` — overwrites the
+> previous PDF even though its objects, tables, and figures are kept separate.
+> Copy the PDF into its stage directory before re-running, or rename it.
 
 **On rendering:** hitting *Knit* in RStudio on an analytics node has been known
 to hang forever; submitting via SLURM works. The reports run under a sequential
@@ -269,9 +311,8 @@ to hang forever; submitting via SLURM works. The reports run under a sequential
 
 ### Running elsewhere
 
-Nothing about the analysis is Quest-specific — only the module loads, the SLURM
-header, and the reference GTF paths in part 1 are. To run locally, restore with
-`renv`, then render directly:
+Nothing about the analysis is Quest-specific — only the module loads and the
+SLURM header are. To run locally, restore with `renv`, then render directly:
 
 ```r
 rmarkdown::render("scRNA_part1_QC.Rmd",
@@ -290,18 +331,26 @@ which is exactly what the SLURM path does.
 The defaults, and why they're defensible for a basic pipeline:
 
 - **Loading:** the raw 10x matrix is preferred; `min.features = 100` at object
-  creation strips empty droplets only. The analytical feature floor is applied
-  in part 2a, so the part-1 QC plots show honest raw distributions.
+  creation strips empty droplets only. The analytical feature floor is applied in
+  part 2a, so the part-1 QC plots show honest raw distributions.
+- **Ambient RNA:** optional SoupX. `autoEstCont()` estimates each sample's
+  contamination fraction independently; part 1 prints the diagnostic plot per
+  sample with its estimate.
+- **Doublets:** optional DoubletFinder per sample, before merging. The expected
+  rate scales with cells recovered (`doublet_rate_per_1k` × cells ÷ 1,000, capped
+  at `doublet_rate_cap`), then is reduced by the estimated homotypic proportion.
 - **Normalization:** `SCTransform` (v2), applied to the merged object.
 - **Integration:** `RPCAIntegration` on the SCT assay, 30 dims, with `k.weight`
-  set dynamically for small samples to avoid the anchor-weighting error.
-- **Clustering:** Louvain on an SNN graph (`int_snn`) built from the *integrated*
+  lowered automatically for small samples to avoid the anchor-weighting error.
+- **Clustering:** Louvain on the SNN graph (`int_snn`) built from the *integrated*
   embedding. The resolution is auto-selected by **subsample stability** rather
-  than silhouette: part 2a repeatedly resamples 80% of cells, re-clusters, and
-  measures how reproducibly each cluster reappears (Jaccard, via `scclusteval`);
-  it then picks the finest resolution whose median per-cluster stability clears a
-  **data-derived** threshold (a chooseR-style decision rule). Part 2b clusters at
-  the chosen (or your overridden) resolution.
+  than silhouette: part 2a resamples 80% of cells several times, re-clusters each
+  subsample, and measures how reproducibly each cluster reappears (Jaccard, via
+  `scclusteval`). Every resolution is scored on the same subsamples, so the
+  comparison between them is paired. It then picks the finest resolution whose
+  median per-cluster stability clears a **data-derived** threshold (a
+  chooseR-style decision rule). Part 2b clusters at the chosen — or your
+  overridden — resolution.
 - **Markers:** `FindAllMarkers` on the SCT assay (after `PrepSCTFindMarkers`),
   Wilcoxon rank-sum, `only.pos = TRUE`, Bonferroni-corrected `p_val_adj`. These
   are cluster *identifiers*, not a formal differential-expression analysis.
@@ -313,10 +362,10 @@ The defaults, and why they're defensible for a basic pipeline:
    can delete legitimate low-ribosomal cell types. Turn it on only with a reason.
 2. **The auto-selected resolution is a starting point, not a verdict.** Stability
    selection resists under-clustering, but it can also suppress small, real
-   populations (rare clusters are inherently less reproducible under
-   resampling). Inspect `stability_vs_resolution.png` (and `clustree.png`, if
-   generated) in the summary; if the pick doesn't match the biology you expect,
-   set `clustering_resolution_value` by hand and re-run part 2b.
+   populations (rare clusters are inherently less reproducible under resampling).
+   Inspect `stability_vs_resolution.png` — and `clustree.png`, if generated — in
+   the summary; if the pick doesn't match the biology you expect, set
+   `clustering_resolution_value` by hand and re-run part 2b.
 
 ### Part 4 is a template
 
@@ -324,7 +373,9 @@ The defaults, and why they're defensible for a basic pipeline:
 It demonstrates a between-group contrast (e.g. by sex) and **must be edited for
 your design**. Two things to fix before using it for anything real:
 
-1. Re-run `PrepSCTFindMarkers` after changing the grouping/idents.
+1. The group assignment is a placeholder that infers sex from a sample-name
+   pattern. Replace it with your actual design, and check that every sample
+   landed in the group you expect.
 2. Per-cell Wilcoxon across sample groups is **pseudoreplication** — it treats
    cells as independent replicates when the experimental unit is the sample. For
    a genuine group comparison, aggregate to **pseudobulk** per sample and test
@@ -335,14 +386,19 @@ your design**. Two things to fix before using it for anything real:
 ## Notes / known limitations
 
 - **Reproducibility is the point.** Use `renv`; don't install stray packages into
-  the project library. `scclusteval` is a real dependency now (part 2a) — make
-  sure it's in the lockfile.
-- Alternate runs (different cutoffs) can coexist via `part1_suffix` /
-  `part2_suffix`, which suffix every output filename.
+  the project library. If you add a dependency, `renv::snapshot()` and commit the
+  lockfile.
+- **Freshness is checked one step back, not all the way up.** Part 2b refuses an
+  integrated object built under different QC or integration parameters. Nothing
+  yet detects a *part 1* re-run invalidating the 2a and 2b results beneath it —
+  if you re-run part 1, treat everything under it as stale.
+- **Suffix discipline is manual.** Nothing stops you from changing a cutoff
+  without changing `part2a_suffix`; the staleness check will catch the resulting
+  mismatch at part 2b, but the directory name will no longer describe its
+  contents. Every report prints its resolved paths and parameters, and part 3
+  includes a run-parameters table, so a mistake is traceable after the fact.
 - If something breaks, it's usually the config YAML, a missing module, or a
   package that didn't restore (`scclusteval`, `presto`, TinyTeX) — check those
   first.
 
 ## License
-
-See `LICENSE`.
